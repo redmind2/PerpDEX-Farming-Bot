@@ -1,0 +1,117 @@
+{
+  "version": 2,
+  "exchange_id": "hibachi",
+  "mode": "live_test_planning",
+  "notes": "Hibachi weekly test plan. This file is non-secret and does not enable live orders by itself. Real keys stay only in local .env or OS environment variables.",
+  "week": {
+    "period_name": "weekly",
+    "timezone": "UTC",
+    "start_weekday_utc": "monday",
+    "start_time_utc": "00:00:00",
+    "end_rule": "exclusive_next_monday_00_00_utc"
+  },
+  "account_groups": [
+    {
+      "account_group_key": "hibachi_1",
+      "enabled": true
+    },
+    {
+      "account_group_key": "hibachi_2",
+      "enabled": false
+    }
+  ],
+  "fx_multiplier": {
+    "enabled": true,
+    "account_type": "fx",
+    "wallet_role": "fx",
+    "volume_accounting": "phase_total",
+    "target_multiplier": 1.05,
+    "target_weekly_volume_usd": 10000,
+    "test_target_note": "Live-test target is intentionally below Hibachi's first FX multiplier tier.",
+    "tiers": [
+      {
+        "weekly_fx_volume_usd_per_market": 100000,
+        "multiplier": 1.05
+      },
+      {
+        "weekly_fx_volume_usd_per_market": 200000,
+        "multiplier": 1.1
+      },
+      {
+        "weekly_fx_volume_usd_per_market": 400000,
+        "multiplier": 1.2
+      },
+      {
+        "weekly_fx_volume_usd_per_market": 600000,
+        "multiplier": 1.3
+      },
+      {
+        "weekly_fx_volume_usd_per_market": 1000000,
+        "multiplier": 1.5
+      }
+    ],
+    "markets": [
+      {
+        "market": "EUR/USDT-P",
+        "enabled": true,
+        "spread_threshold_source": "7d_average_bps",
+        "fallback_average_spread_bps": 1.04,
+        "max_allowed_spread_bps": 1.04
+      },
+      {
+        "market": "GBP/USDT-P",
+        "enabled": false,
+        "spread_threshold_source": "market_config_or_manual_live_test",
+        "fallback_average_spread_bps": 1.0,
+        "max_allowed_spread_bps": 1.0
+      },
+      {
+        "market": "AUD/USDT-P",
+        "enabled": false,
+        "spread_threshold_source": "market_config_or_manual_live_test",
+        "fallback_average_spread_bps": 1.0,
+        "max_allowed_spread_bps": 1.0
+      },
+      {
+        "market": "NZD/USDT-P",
+        "enabled": false,
+        "spread_threshold_source": "market_config_or_manual_live_test",
+        "fallback_average_spread_bps": 1.0,
+        "max_allowed_spread_bps": 1.0
+      }
+    ]
+  },
+  "crypto_volume": {
+    "enabled": true,
+    "account_type": "crypto",
+    "wallet_role": "crypto",
+    "target_weekly_volume_usd": 10000,
+    "starts_after": "fx_test_target_reached",
+    "markets": [
+      {
+        "market": "BTC/USDT-P",
+        "enabled": true,
+        "spread_threshold_source": "7d_average_bps",
+        "fallback_average_spread_bps": 0.16,
+        "max_allowed_spread_bps": 0.16
+      }
+    ]
+  },
+  "execution_sizing": {
+    "order_sizing_rule": "min(max_order_notional_usd, market_order_safety_max_notional_usd, smaller_best_bid_or_ask_level_size * level_size_fraction * market_order_liquidity_safety_fraction)",
+    "max_order_notional_usd": 100,
+    "market_order_safety_max_notional_usd": 100,
+    "level_size_fraction": 0.5,
+    "market_order_liquidity_safety_fraction": 1.0,
+    "gross_volume_counting": "both_sides"
+  },
+  "safety": {
+    "live_orders_enabled": false,
+    "requires_explicit_confirmation": true,
+    "min_entry_delay_seconds": 1,
+    "max_order_notional_usd": 100,
+    "max_idle_cycles": 120,
+    "residual_position_close_mode": "immediate_reduce_only",
+    "stop_on_residual_close": true
+  }
+}

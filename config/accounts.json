@@ -1,0 +1,138 @@
+{
+  "version": 3,
+  "notes": "Do not store real API keys, private keys, signatures, or session keys in this file. Put real values only in local .env or OS environment variables. For Hibachi, one logical account group has two separated wallets/API key sets: Crypto and FX.",
+  "account_groups": [
+    {
+      "account_group_key": "hibachi_1",
+      "exchange_id": "hibachi",
+      "label": "Hibachi 1",
+      "enabled": true,
+      "empty_wallet_means_disabled": true,
+      "wallets": {
+        "crypto": {
+          "wallet_key": "hibachi_1_crypto",
+          "wallet_id": "hibachi_1_crypto",
+          "label": "Hibachi 1 Crypto",
+          "account_type": "crypto",
+          "enabled": true,
+          "credential_env_prefix": "HIBACHI_1_CRYPTO",
+          "legacy_credential_env_prefixes": [
+            "HIBACHI_1"
+          ],
+          "env_var_names": {
+            "api_key": "HIBACHI_1_CRYPTO_API_KEY_PRODUCTION",
+            "public_key": "HIBACHI_1_CRYPTO_PUBLIC_KEY_PRODUCTION",
+            "private_key": "HIBACHI_1_CRYPTO_PRIVATE_KEY_PRODUCTION",
+            "account_id": "HIBACHI_1_CRYPTO_ACCOUNT_ID_PRODUCTION"
+          },
+          "legacy_env_var_names": {
+            "api_key": "HIBACHI_1_API_KEY_PRODUCTION",
+            "public_key": "HIBACHI_1_PUBLIC_KEY_PRODUCTION",
+            "private_key": "HIBACHI_1_PRIVATE_KEY_PRODUCTION",
+            "account_id": "HIBACHI_1_ACCOUNT_ID_PRODUCTION"
+          },
+          "permissions": {
+            "public_readonly_enabled": true,
+            "private_readonly_enabled": true,
+            "paper_trading_enabled": true,
+            "live_orders_enabled": false,
+            "cancel_orders_enabled": false,
+            "transfer_enabled": false,
+            "withdraw_enabled": false
+          }
+        },
+        "fx": {
+          "wallet_key": "hibachi_1_fx",
+          "wallet_id": "hibachi_1_fx",
+          "label": "Hibachi 1 FX",
+          "account_type": "fx",
+          "enabled": true,
+          "credential_env_prefix": "HIBACHI_1_FX",
+          "legacy_credential_env_prefixes": [],
+          "env_var_names": {
+            "api_key": "HIBACHI_1_FX_API_KEY_PRODUCTION",
+            "public_key": "HIBACHI_1_FX_PUBLIC_KEY_PRODUCTION",
+            "private_key": "HIBACHI_1_FX_PRIVATE_KEY_PRODUCTION",
+            "account_id": "HIBACHI_1_FX_ACCOUNT_ID_PRODUCTION"
+          },
+          "legacy_env_var_names": {},
+          "permissions": {
+            "public_readonly_enabled": true,
+            "private_readonly_enabled": true,
+            "paper_trading_enabled": true,
+            "live_orders_enabled": false,
+            "cancel_orders_enabled": false,
+            "transfer_enabled": false,
+            "withdraw_enabled": false
+          }
+        }
+      }
+    },
+    {
+      "account_group_key": "hibachi_2",
+      "exchange_id": "hibachi",
+      "label": "Hibachi 2 template",
+      "enabled": false,
+      "empty_wallet_means_disabled": true,
+      "wallets": {
+        "crypto": {
+          "wallet_key": "hibachi_2_crypto",
+          "wallet_id": "hibachi_2_crypto",
+          "label": "Hibachi 2 Crypto",
+          "account_type": "crypto",
+          "enabled": false,
+          "credential_env_prefix": "HIBACHI_2_CRYPTO",
+          "legacy_credential_env_prefixes": [
+            "HIBACHI_2"
+          ],
+          "env_var_names": {
+            "api_key": "HIBACHI_2_CRYPTO_API_KEY_PRODUCTION",
+            "public_key": "HIBACHI_2_CRYPTO_PUBLIC_KEY_PRODUCTION",
+            "private_key": "HIBACHI_2_CRYPTO_PRIVATE_KEY_PRODUCTION",
+            "account_id": "HIBACHI_2_CRYPTO_ACCOUNT_ID_PRODUCTION"
+          },
+          "legacy_env_var_names": {
+            "api_key": "HIBACHI_2_API_KEY_PRODUCTION",
+            "public_key": "HIBACHI_2_PUBLIC_KEY_PRODUCTION",
+            "private_key": "HIBACHI_2_PRIVATE_KEY_PRODUCTION",
+            "account_id": "HIBACHI_2_ACCOUNT_ID_PRODUCTION"
+          },
+          "permissions": {
+            "public_readonly_enabled": true,
+            "private_readonly_enabled": true,
+            "paper_trading_enabled": true,
+            "live_orders_enabled": false,
+            "cancel_orders_enabled": false,
+            "transfer_enabled": false,
+            "withdraw_enabled": false
+          }
+        },
+        "fx": {
+          "wallet_key": "hibachi_2_fx",
+          "wallet_id": "hibachi_2_fx",
+          "label": "Hibachi 2 FX",
+          "account_type": "fx",
+          "enabled": false,
+          "credential_env_prefix": "HIBACHI_2_FX",
+          "legacy_credential_env_prefixes": [],
+          "env_var_names": {
+            "api_key": "HIBACHI_2_FX_API_KEY_PRODUCTION",
+            "public_key": "HIBACHI_2_FX_PUBLIC_KEY_PRODUCTION",
+            "private_key": "HIBACHI_2_FX_PRIVATE_KEY_PRODUCTION",
+            "account_id": "HIBACHI_2_FX_ACCOUNT_ID_PRODUCTION"
+          },
+          "legacy_env_var_names": {},
+          "permissions": {
+            "public_readonly_enabled": true,
+            "private_readonly_enabled": true,
+            "paper_trading_enabled": true,
+            "live_orders_enabled": false,
+            "cancel_orders_enabled": false,
+            "transfer_enabled": false,
+            "withdraw_enabled": false
+          }
+        }
+      }
+    }
+  ]
+}

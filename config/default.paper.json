@@ -1,0 +1,129 @@
+{
+  "mode": "paper",
+  "market": "BTC-PERP",
+  "execution_context": {
+    "exchange_id": "mock_exchange",
+    "account_id": "paper_account_1",
+    "wallet_id": "paper_wallet_1",
+    "market": "BTC-PERP"
+  },
+  "exchanges": [
+    {
+      "exchange_id": "mock_exchange",
+      "connector": "mock",
+      "points_source": "unavailable"
+    },
+    {
+      "exchange_id": "hibachi",
+      "connector": "hibachi_sdk",
+      "points_source": "unavailable"
+    }
+  ],
+  "accounts": [
+    {
+      "account_id": "paper_account_1",
+      "exchange_id": "mock_exchange",
+      "wallet_id": "paper_wallet_1",
+      "credential_env_prefix": "MOCK_EXCHANGE_PAPER_1"
+    },
+    {
+      "account_id": "paper_account_2",
+      "exchange_id": "mock_exchange",
+      "wallet_id": "paper_wallet_2",
+      "credential_env_prefix": "MOCK_EXCHANGE_PAPER_2"
+    },
+    {
+      "account_id": "hibachi_account_1",
+      "exchange_id": "hibachi",
+      "wallet_id": "hibachi_wallet_1",
+      "credential_env_prefix": "HIBACHI"
+    }
+  ],
+  "strategy_assignments": [
+    {
+      "assignment_id": "mock_exchange.paper_account_1.BTC-PERP.market-market",
+      "exchange_id": "mock_exchange",
+      "account_id": "paper_account_1",
+      "wallet_id": "paper_wallet_1",
+      "paired_account_id": null,
+      "paired_wallet_id": null,
+      "market": "BTC-PERP",
+      "strategy": "market-market",
+      "enabled": true
+    },
+    {
+      "assignment_id": "mock_exchange.paper_pair_1.BTC-PERP.paired-delta-neutral",
+      "exchange_id": "mock_exchange",
+      "account_id": "paper_account_1",
+      "wallet_id": "paper_wallet_1",
+      "paired_account_id": "paper_account_2",
+      "paired_wallet_id": "paper_wallet_2",
+      "market": "BTC-PERP",
+      "strategy": "paired-delta-neutral",
+      "enabled": false
+    }
+  ],
+  "cooldown_seconds": 3,
+  "strategy": {
+    "notional_cap_usd": 20,
+    "level_size_fraction": 0.5,
+    "spread_vs_average_ratio": 1.0,
+    "max_spread_bps": 0,
+    "max_gap_to_spread_ratio": 0.25,
+    "trade_tape_window_seconds": 5,
+    "min_repeating_trade_count": 4,
+    "delta_neutral_total_collateral_usd": 1000,
+    "delta_neutral_notional_cap_usd": 20,
+    "delta_neutral_notional_pct_of_collateral": 0.02,
+    "delta_neutral_max_pair_position_usd": 100,
+    "delta_neutral_max_pair_position_pct_of_collateral": 0.1,
+    "delta_neutral_min_hold_seconds": 3600,
+    "delta_neutral_exit_after_seconds": 7200
+  },
+  "risk": {
+    "max_order_notional_usd": 20,
+    "max_position_notional_usd": 100,
+    "max_daily_loss_usd": 5,
+    "max_orders_per_run": 4,
+    "max_price_age_seconds": 10,
+    "kill_switch_enabled": false
+  },
+  "budget": {
+    "period_name": "daily",
+    "period_start_weekday_utc": "monday",
+    "max_period_loss_usd": 5,
+    "max_period_volume_usd": 500,
+    "max_round_loss_usd": 1,
+    "max_round_volume_usd": 40
+  },
+  "points": {
+    "enabled": true,
+    "source": "unavailable",
+    "assumed_points_per_usd_volume": null
+  },
+  "compliance": {
+    "allow_market_taker_round_trip": true,
+    "prohibit_self_cross": true,
+    "prohibit_wash_trading": true,
+    "require_external_counterparty": true,
+    "notes": "Market-market taker flow is allowed as a fee-paying external-liquidity strategy. Self-filling your own limit order remains prohibited."
+  },
+  "secrets": {
+    "env_file": ".env",
+    "required_env_vars": [
+      "HIBACHI_API_KEY_PRODUCTION",
+      "HIBACHI_PUBLIC_KEY_PRODUCTION",
+      "HIBACHI_PRIVATE_KEY_PRODUCTION",
+      "HIBACHI_ACCOUNT_ID_PRODUCTION"
+    ],
+    "forbidden_plaintext_keys": [
+      "api_key",
+      "api_secret",
+      "private_key",
+      "secret_key",
+      "seed_phrase",
+      "session_key",
+      "signature"
+    ]
+  }
+}

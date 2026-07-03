@@ -1,8 +1,9 @@
 __pycache__/
-.venv/
-.env
-.env.*
-data/
-logs/
+*.py[cod]
 *.sqlite
-*.sqlite-*
+*.sqlite3
+.env
+.venv/
+logs/
+data/
+

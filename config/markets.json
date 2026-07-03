@@ -1,0 +1,97 @@
+{
+  "version": 2,
+  "notes": "Market metadata for read-only, paper-only, and explicitly approved live checks. Values here are not secrets and do not enable live orders.",
+  "markets": [
+    {
+      "exchange_id": "hibachi",
+      "market": "BTC/USDT-P",
+      "market_type": "crypto",
+      "data_hub_symbol": "BTC-PERP",
+      "base_asset": "BTC",
+      "quote_asset": "USDT",
+      "enabled_for_paper": true,
+      "enabled_for_live_orders": false,
+      "orderbook_granularity": 0.1,
+      "spread_reference": {
+        "source": "user_provided",
+        "recorded_date": "2026-07-02",
+        "current_spread_usd": 0.4,
+        "current_spread_bps": 0.07,
+        "reference_window": "7d",
+        "average_spread_usd": 0.9785,
+        "average_spread_bps": 0.16,
+        "sample_count": 947
+      },
+      "paper_thresholds": {
+        "max_spread_bps": 0.16,
+        "spread_vs_average_ratio": 1.0,
+        "max_order_notional_usd": 100,
+        "max_round_volume_usd": 200,
+        "max_weekly_volume_usd": 1000,
+        "max_weekly_loss_usd": 5
+      }
+    },
+    {
+      "exchange_id": "hibachi",
+      "market": "EUR/USDT-P",
+      "market_type": "fx",
+      "data_hub_symbol": "EUR-PERP",
+      "base_asset": "EUR",
+      "quote_asset": "USDT",
+      "enabled_for_paper": false,
+      "enabled_for_live_orders": false,
+      "fx_multiplier_eligible": true,
+      "orderbook_granularity": 0.0001,
+      "weekly_multiplier_threshold_usd": 1000000,
+      "spread_reference": {
+        "source": "user_provided",
+        "recorded_date": "2026-07-02",
+        "current_spread_usd": 0.0001,
+        "current_spread_bps": 0.88,
+        "reference_window": "7d",
+        "average_spread_usd": 0.0001,
+        "average_spread_bps": 1.04,
+        "sample_count": 949
+      }
+    },
+    {
+      "exchange_id": "hibachi",
+      "market": "GBP/USDT-P",
+      "market_type": "fx",
+      "data_hub_symbol": "GBP-PERP",
+      "base_asset": "GBP",
+      "quote_asset": "USDT",
+      "enabled_for_paper": false,
+      "enabled_for_live_orders": false,
+      "fx_multiplier_eligible": true,
+      "orderbook_granularity": 0.0001,
+      "weekly_multiplier_threshold_usd": 1000000
+    },
+    {
+      "exchange_id": "hibachi",
+      "market": "AUD/USDT-P",
+      "market_type": "fx",
+      "data_hub_symbol": "AUD-PERP",
+      "base_asset": "AUD",
+      "quote_asset": "USDT",
+      "enabled_for_paper": false,
+      "enabled_for_live_orders": false,
+      "fx_multiplier_eligible": true,
+      "orderbook_granularity": 0.0001,
+      "weekly_multiplier_threshold_usd": 1000000
+    },
+    {
+      "exchange_id": "hibachi",
+      "market": "NZD/USDT-P",
+      "market_type": "fx",
+      "data_hub_symbol": "NZD-PERP",
+      "base_asset": "NZD",
+      "quote_asset": "USDT",
+      "enabled_for_paper": false,
+      "enabled_for_live_orders": false,
+      "fx_multiplier_eligible": true,
+      "orderbook_granularity": 0.0001,
+      "weekly_multiplier_threshold_usd": 1000000
+    }
+  ]
+}
