@@ -5,6 +5,27 @@ This folder stores non-secret bot settings only.
 Never put real API keys, private keys, signatures, session keys, or seed phrases in this folder.
 Real credentials belong only in the local `.env` file or OS environment variables.
 
+## SQLite Settings Direction
+
+Repo JSON files are still supported while the bot is being stabilized, but new operator-facing settings should move toward the local SQLite settings DB:
+
+```powershell
+$env:PYTHONPATH="src"
+python -m perpdex_farming_bot.cli.settings_db init
+python -m perpdex_farming_bot.cli.settings_db import-json --path config/hotstuff.live-test.json --namespace hotstuff.live_test
+```
+
+The default DB path is `data/bot_settings.sqlite`. It is local-only and ignored by git.
+
+The local web GUI can initialize this DB:
+
+```powershell
+$env:PYTHONPATH="src"
+python -m perpdex_farming_bot.cli.gui
+```
+
+Open `http://127.0.0.1:8765`.
+
 ## Current Runtime Config
 
 `hibachi.paper.json` is the active Hibachi paper-cycle config.
@@ -74,6 +95,27 @@ python -m perpdex_farming_bot.cli.hibachi_paper_cycle `
 That command reads the average spread from `markets.json`, reads the live public orderbook from Hibachi, and still sends no real orders.
 
 `hibachi.paper.json` still controls runtime budgets such as max order notional, max weekly volume, weekly start day, and kill switch.
+
+## Hotstuff Phase 0 Skeleton
+
+`hotstuff.paper.json` is a non-secret skeleton for Hotstuff. It keeps strategy assignments disabled, `max_orders_per_run` at `0`, and `kill_switch_enabled` at `true`.
+
+Safe local checks:
+
+```powershell
+$env:PYTHONPATH="src"
+python -m perpdex_farming_bot.cli.check_hotstuff_env
+python -m perpdex_farming_bot.cli.hotstuff_readonly_smoke
+```
+
+Optional public read-only network check:
+
+```powershell
+$env:PYTHONPATH="src"
+python -m perpdex_farming_bot.cli.hotstuff_readonly_smoke --network --public --public-method ticker --symbol all
+```
+
+See `docs/hotstuff-onboarding.md` before moving to private read-only or paper-only work.
 
 ## Hibachi Weekly FX Multiplier Plan
 

@@ -1,0 +1,101 @@
+{
+  "mode": "paper",
+  "market": "BTC-PERP",
+  "execution_context": {
+    "exchange_id": "hotstuff",
+    "account_id": "hotstuff_account_1",
+    "wallet_id": "hotstuff_wallet_1",
+    "market": "BTC-PERP"
+  },
+  "exchanges": [
+    {
+      "exchange_id": "hotstuff",
+      "connector": "hotstuff_readonly_then_paper",
+      "points_source": "unavailable"
+    }
+  ],
+  "accounts": [
+    {
+      "account_id": "hotstuff_account_1",
+      "exchange_id": "hotstuff",
+      "wallet_id": "hotstuff_wallet_1",
+      "credential_env_prefix": "HOTSTUFF"
+    }
+  ],
+  "strategy_assignments": [
+    {
+      "assignment_id": "hotstuff.hotstuff_account_1.BTC-PERP.market-market",
+      "exchange_id": "hotstuff",
+      "account_id": "hotstuff_account_1",
+      "wallet_id": "hotstuff_wallet_1",
+      "paired_account_id": null,
+      "paired_wallet_id": null,
+      "market": "BTC-PERP",
+      "data_hub_symbol": null,
+      "strategy": "market-market",
+      "enabled": false
+    }
+  ],
+  "cooldown_seconds": 3,
+  "strategy": {
+    "notional_cap_usd": 10,
+    "level_size_fraction": 0.5,
+    "spread_vs_average_ratio": 1.0,
+    "max_spread_bps": 0.1,
+    "max_gap_to_spread_ratio": 0.25,
+    "trade_tape_window_seconds": 5,
+    "min_repeating_trade_count": 4,
+    "delta_neutral_total_collateral_usd": 1000,
+    "delta_neutral_notional_cap_usd": 10,
+    "delta_neutral_notional_pct_of_collateral": 0.01,
+    "delta_neutral_max_pair_position_usd": 50,
+    "delta_neutral_max_pair_position_pct_of_collateral": 0.05,
+    "delta_neutral_min_hold_seconds": 3600,
+    "delta_neutral_exit_after_seconds": 7200
+  },
+  "risk": {
+    "max_order_notional_usd": 10,
+    "max_position_notional_usd": 10,
+    "max_daily_loss_usd": 1,
+    "max_orders_per_run": 0,
+    "max_price_age_seconds": 600,
+    "kill_switch_enabled": true
+  },
+  "budget": {
+    "period_name": "weekly",
+    "period_start_weekday_utc": "monday",
+    "max_period_loss_usd": 1,
+    "max_period_volume_usd": 100,
+    "max_round_loss_usd": 0.25,
+    "max_round_volume_usd": 10
+  },
+  "points": {
+    "enabled": false,
+    "source": "unavailable",
+    "assumed_points_per_usd_volume": null
+  },
+  "compliance": {
+    "allow_market_taker_round_trip": false,
+    "prohibit_self_cross": true,
+    "prohibit_wash_trading": true,
+    "require_external_counterparty": true,
+    "notes": "Hotstuff config is a paper-only skeleton. No live order, cancel, transfer, or position-changing path is enabled."
+  },
+  "secrets": {
+    "env_file": ".env",
+    "required_env_vars": [
+      "HOTSTUFF_ACCOUNT_ADDRESS_PRODUCTION",
+      "HOTSTUFF_SIGNER_ADDRESS_PRODUCTION",
+      "HOTSTUFF_SIGNER_PRIVATE_KEY_PRODUCTION"
+    ],
+    "forbidden_plaintext_keys": [
+      "api_key",
+      "api_secret",
+      "private_key",
+      "secret_key",
+      "seed_phrase",
+      "session_key",
+      "signature"
+    ]
+  }
+}
