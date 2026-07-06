@@ -16,6 +16,9 @@ Current SDK policy:
 
 - Hibachi live/read-only SDK: `hibachi-xyz==0.3.1`
 - Hotstuff live order SDK: `hotstuff-python-sdk==0.1.1b4`
+- RiseX SDK note: official docs point to `risex-client`, an unofficial
+  community TypeScript SDK. This Python repo uses direct read-only REST and
+  WebSocket skeletons first.
 - Hotstuff signer helper: `eth-account>=0.13,<0.14`
 - WebSocket market monitor: `websockets==16.0`
 
@@ -74,6 +77,7 @@ $env:PYTHONPATH="src"
 python -m compileall src
 python -m perpdex_farming_bot.cli.check_hibachi_env
 python -m perpdex_farming_bot.cli.check_hotstuff_env
+python -m perpdex_farming_bot.cli.check_risex_env --environment testnet
 ```
 
 Read-only network checks:
@@ -82,6 +86,8 @@ Read-only network checks:
 $env:PYTHONPATH="src"
 python -m perpdex_farming_bot.cli.hibachi_sdk_smoke --network --public --symbol BTC/USDT-P
 python -m perpdex_farming_bot.cli.hotstuff_readonly_smoke --environment production --network
+python -m perpdex_farming_bot.cli.risex_readonly_smoke --environment testnet --network --public --public-check markets
+python -m perpdex_farming_bot.cli.risex_readonly_smoke --environment testnet --network --public --public-check orderbook --market-id 1
 ```
 
 Only after env, public read-only, private read-only, paper-only, and dry-run are

@@ -14,6 +14,8 @@ HIBACHI_REQUIRED_FIELDS = (
 
 HOTSTUFF_PRIVATE_READONLY_FIELDS = ("ACCOUNT_ADDRESS",)
 HOTSTUFF_SIGNING_FIELDS = ("SIGNER_ADDRESS", "SIGNER_PRIVATE_KEY")
+RISEX_PRIVATE_READONLY_FIELDS = ("ACCOUNT_ADDRESS",)
+RISEX_SIGNING_FIELDS = ("SIGNER_ADDRESS", "SIGNER_PRIVATE_KEY")
 
 
 @dataclass(frozen=True)
@@ -147,6 +149,75 @@ def read_hotstuff_credentials(prefix: str, environment: str = "PRODUCTION") -> d
 
 
 def _hotstuff_credential_environment(environment: str) -> str:
+    normalized = normalize_env_prefix(environment)
+    if normalized in {"MAINNET", "PROD", "PRODUCTION"}:
+        return "PRODUCTION"
+    if normalized in {"TEST", "TESTNET"}:
+        return "TESTNET"
+    return normalized
+
+
+@dataclass(frozen=True)
+class RisexCredentialEnv:
+    prefix: str
+    environment: str
+    account_address: str
+    signer_address: str
+    signer_private_key: str
+
+    @property
+    def private_readonly_names(self) -> tuple[str, ...]:
+        return (self.account_address,)
+
+    @property
+    def signing_names(self) -> tuple[str, ...]:
+        return (self.signer_address, self.signer_private_key)
+
+
+def risex_credential_env(prefix: str, environment: str = "TESTNET") -> RisexCredentialEnv:
+    canonical = normalize_env_prefix(prefix)
+    env = _risex_credential_environment(environment)
+    return RisexCredentialEnv(
+        prefix=canonical,
+        environment=env,
+        account_address=env_name(canonical, "ACCOUNT_ADDRESS", env),
+        signer_address=env_name(canonical, "SIGNER_ADDRESS", env),
+        signer_private_key=env_name(canonical, "SIGNER_PRIVATE_KEY", env),
+    )
+
+
+def risex_available_private_readonly_env(prefix: str, environment: str = "TESTNET") -> RisexCredentialEnv | None:
+    candidate = risex_credential_env(prefix, environment)
+    if all(masked_env_status(name) != "missing" for name in candidate.private_readonly_names):
+        return candidate
+    return None
+
+
+def risex_private_readonly_missing(prefix: str, environment: str = "TESTNET") -> list[str]:
+    names = risex_credential_env(prefix, environment).private_readonly_names
+    return [name for name in names if masked_env_status(name) == "missing"]
+
+
+def risex_signing_missing(prefix: str, environment: str = "TESTNET") -> list[str]:
+    names = risex_credential_env(prefix, environment)
+    return [name for name in names.signing_names if masked_env_status(name) == "missing"]
+
+
+def read_risex_private_readonly_params(prefix: str, environment: str = "TESTNET") -> dict[str, str]:
+    names = risex_available_private_readonly_env(prefix, environment) or risex_credential_env(prefix, environment)
+    return {"account": get_env(names.account_address)}
+
+
+def read_risex_credentials(prefix: str, environment: str = "TESTNET") -> dict[str, str]:
+    names = risex_credential_env(prefix, environment)
+    return {
+        "account_address": get_env(names.account_address),
+        "signer_address": get_env(names.signer_address),
+        "signer_private_key": get_env(names.signer_private_key),
+    }
+
+
+def _risex_credential_environment(environment: str) -> str:
     normalized = normalize_env_prefix(environment)
     if normalized in {"MAINNET", "PROD", "PRODUCTION"}:
         return "PRODUCTION"

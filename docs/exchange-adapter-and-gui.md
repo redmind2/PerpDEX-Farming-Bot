@@ -28,6 +28,7 @@ Current adapter files:
 - `src/perpdex_farming_bot/exchanges/base.py`
 - `src/perpdex_farming_bot/exchanges/hotstuff.py`
 - `src/perpdex_farming_bot/exchanges/hibachi.py`
+- `src/perpdex_farming_bot/exchanges/risex.py`
 
 The core runner lives at:
 
@@ -113,6 +114,21 @@ The GUI cannot:
 - open or close positions
 
 Live actions still require a separate CLI command with exact confirmation text.
+
+## RiseX Phase 0
+
+RiseX is added as a separated Phase 0 skeleton:
+
+- env check: `src/perpdex_farming_bot/cli/check_risex_env.py`
+- REST read-only smoke: `src/perpdex_farming_bot/cli/risex_readonly_smoke.py`
+- REST connector: `src/perpdex_farming_bot/connectors/risex_readonly.py`
+- market data skeleton: `src/perpdex_farming_bot/marketdata/risex.py`
+- adapter skeleton: `src/perpdex_farming_bot/exchanges/risex.py`
+
+The current RiseX adapter can list positions through read-only REST, but live
+order methods intentionally raise `AdapterError`. WebSocket orderbook data is
+for opportunity monitoring; REST `/v1/orderbook` is the fresh verification path
+before any future order submission.
 
 ## Telegram Role
 
