@@ -18,6 +18,7 @@ from perpdex_farming_bot.exchanges.base import ExchangeOrderResult, ExchangePosi
 class HibachiAdapter:
     credential_prefix: str
     max_fees_percent: Decimal = Decimal("0.0005")
+    client: object | None = None
 
     exchange_id: str = "hibachi"
 
@@ -46,6 +47,8 @@ class HibachiAdapter:
         buy_size: Decimal,
         sell_size: Decimal,
         planned_gross_volume_usd: Decimal,
+        first_side: str = "BUY",
+        second_side: str = "SELL",
     ) -> PairedRoundtripResult:
         del instrument_id, buy_price, sell_price
         if buy_size != sell_size:
@@ -60,7 +63,7 @@ class HibachiAdapter:
         client = self._client()
         args = _HibachiBatchArgs(max_fees_percent=self.max_fees_percent)
         assignment = _Assignment(market=market)
-        status = _execute_paired_market_batch(client, assignment, args, buy_size, "BUY", "SELL")
+        status = _execute_paired_market_batch(client, assignment, args, buy_size, first_side, second_side)
         return PairedRoundtripResult(
             self.exchange_id,
             market,
@@ -101,6 +104,8 @@ class HibachiAdapter:
     def _client(self) -> object:
         from hibachi_xyz import HibachiApiClient
 
+        if self.client is not None:
+            return self.client
         credentials = read_hibachi_credentials(self.credential_prefix)
         api_endpoint = endpoint_from_env(get_env("HIBACHI_API_ENDPOINT_PRODUCTION"), DEFAULT_HIBACHI_API_ENDPOINT)
         data_endpoint = endpoint_from_env(

@@ -13,7 +13,7 @@ HIBACHI_REQUIRED_FIELDS = (
 )
 
 HOTSTUFF_PRIVATE_READONLY_FIELDS = ("ACCOUNT_ADDRESS",)
-HOTSTUFF_SIGNING_FIELDS = ("SIGNER_PRIVATE_KEY",)
+HOTSTUFF_SIGNING_FIELDS = ("SIGNER_ADDRESS", "SIGNER_PRIVATE_KEY")
 
 
 @dataclass(frozen=True)
@@ -89,7 +89,7 @@ class HotstuffCredentialEnv:
 
     @property
     def signing_names(self) -> tuple[str, ...]:
-        return (self.signer_private_key,)
+        return (self.signer_address, self.signer_private_key)
 
 
 def hotstuff_credential_env(prefix: str, environment: str = "PRODUCTION") -> HotstuffCredentialEnv:
@@ -122,11 +122,12 @@ def hotstuff_private_readonly_missing(prefix: str, environment: str = "PRODUCTIO
 
 def hotstuff_signing_missing(prefix: str, environment: str = "PRODUCTION") -> list[str]:
     names = hotstuff_credential_env(prefix, environment)
-    has_new_signer_key = masked_env_status(names.signer_private_key) != "missing"
-    has_legacy_key = masked_env_status(names.legacy_private_key) != "missing"
-    if has_new_signer_key or has_legacy_key:
-        return []
-    return [names.signer_private_key]
+    missing: list[str] = []
+    if masked_env_status(names.signer_address) == "missing":
+        missing.append(names.signer_address)
+    if masked_env_status(names.signer_private_key) == "missing":
+        missing.append(names.signer_private_key)
+    return missing
 
 
 def read_hotstuff_private_readonly_params(prefix: str, environment: str = "PRODUCTION") -> dict[str, str]:

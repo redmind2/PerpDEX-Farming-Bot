@@ -17,19 +17,25 @@ from perpdex_farming_bot.cli.hotstuff_live_preflight import (
 from perpdex_farming_bot.connectors.hotstuff_readonly import (
     api_endpoint_env_name,
     default_api_endpoint,
+    default_wss_endpoint,
     endpoint_from_env,
     info_post_json,
     normalize_hotstuff_environment,
     validate_https_base_url,
+    validate_wss_url,
+    wss_endpoint_env_name,
 )
 from perpdex_farming_bot.core.live_volume import RoundtripPlan, VolumeRunConfig, run_paired_volume
 from perpdex_farming_bot.credentials import (
     hotstuff_available_private_readonly_env,
+    hotstuff_signing_missing,
     read_hotstuff_credentials,
     read_hotstuff_private_readonly_params,
 )
 from perpdex_farming_bot.env import get_env, load_dotenv_if_present
 from perpdex_farming_bot.exchanges.hotstuff import HotstuffAdapter
+from perpdex_farming_bot.marketdata import MarketSpec, RestBackoff, SpreadCache, select_lowest_spread
+from perpdex_farming_bot.marketdata.hotstuff import refresh_hotstuff_spread_cache
 
 
 CONFIRM_TEXT = "LIVE_HOTSTUFF_100_USD_TO_1000"
@@ -52,6 +58,11 @@ def main() -> None:
     parser.add_argument("--timeout-seconds", type=float, default=10.0)
     parser.add_argument("--max-spread-bps", type=Decimal, default=None)
     parser.add_argument("--min-entry-delay-seconds", type=float, default=None)
+    parser.add_argument("--monitor-source", choices=("auto", "websocket", "rest"), default="auto")
+    parser.add_argument("--monitor-cache-max-age-seconds", type=float, default=2.0)
+    parser.add_argument("--websocket-snapshot-timeout-seconds", type=float, default=0.8)
+    parser.add_argument("--rest-poll-min-interval-seconds", type=float, default=0.1)
+    parser.add_argument("--rate-limit-backoff-seconds", type=float, default=5.0)
     parser.add_argument("--reduce-only-settle-attempts", type=int, default=5)
     parser.add_argument("--reduce-only-settle-delay-seconds", type=float, default=0.5)
     parser.add_argument("--reduce-only-slippage-bps", type=Decimal, default=Decimal("100"))
@@ -67,9 +78,15 @@ def main() -> None:
         api_name,
         endpoint_from_env(get_env(api_name), default_api_endpoint(environment)),
     )
+    wss_name = wss_endpoint_env_name(environment)
+    wss_endpoint = validate_wss_url(
+        wss_name,
+        endpoint_from_env(get_env(wss_name), default_wss_endpoint(environment)),
+    )
     order_notional = args.order_notional_usd or Decimal(str(plan["order_notional_usd"]))
     target_gross_volume = args.target_gross_volume_usd or Decimal(str(plan["target_gross_volume_usd"]))
     max_spread_bps = args.max_spread_bps or Decimal(str(plan["max_spread_bps"]))
+    level_size_fraction = Decimal(str(plan.get("level_size_fraction", "0.5")))
     min_entry_delay_seconds = (
         args.min_entry_delay_seconds
         if args.min_entry_delay_seconds is not None
@@ -77,18 +94,29 @@ def main() -> None:
     )
 
     _validate_live_args(order_notional, target_gross_volume, args.max_cycles, min_entry_delay_seconds)
+    _validate_level_size_fraction(level_size_fraction)
 
     print("hotstuff_live_test=explicit_confirm_required")
     print(f"env_file_loaded={env_loaded}")
     print(f"environment={environment}")
     print(f"api_endpoint={api_endpoint}")
+    print(f"wss_endpoint={wss_endpoint}")
     print(f"config={args.config}")
     print(f"credential_prefix={args.credential_prefix}")
     print(f"execute_live={args.execute_live}")
     print(f"order_notional_usd={order_notional}")
     print(f"target_gross_volume_usd={target_gross_volume}")
     print(f"max_spread_bps={max_spread_bps}")
+    print(f"level_size_fraction={level_size_fraction}")
+    print(
+        "order_sizing_rule="
+        "min(order_notional_usd, remaining_gross_volume_usd/2, smaller_best_bid_or_ask_level_notional*level_size_fraction)"
+    )
     print(f"min_entry_delay_seconds={min_entry_delay_seconds}")
+    print(f"monitor_source={args.monitor_source}")
+    print(f"monitor_cache_max_age_seconds={args.monitor_cache_max_age_seconds}")
+    print(f"websocket_snapshot_timeout_seconds={args.websocket_snapshot_timeout_seconds}")
+    print("fresh_orderbook_verify=selected_market_only_before_order")
     print("orders_require_confirmation=True")
     print(f"required_confirmation={CONFIRM_TEXT}")
 
@@ -100,11 +128,12 @@ def main() -> None:
         return
 
     credentials = read_hotstuff_credentials(args.credential_prefix, environment)
-    private_key_present = bool(credentials["signer_private_key"])
-    print(f"signing_env_ready={private_key_present}")
-    if not private_key_present:
+    signing_missing = hotstuff_signing_missing(args.credential_prefix, environment)
+    print(f"signing_env_ready={not signing_missing}")
+    if signing_missing:
+        print("signing_missing_required=" + ",".join(signing_missing))
         print("live_ready=False")
-        print("reason=missing_signer_private_key_env")
+        print("reason=missing_signing_env")
         return
 
     sdk_installed = importlib.util.find_spec("hotstuff") is not None and importlib.util.find_spec("eth_account") is not None
@@ -136,9 +165,18 @@ def main() -> None:
     print(f"selected_instrument_id={selected.instrument_id}")
     print(f"selected_live_spread_bps={selected.live_spread_bps:.4f}")
     print(f"selected_24h_threshold_bps={selected.provided_24h_spread_bps}")
-    buy_qty, buy_price = _quantity_for_notional(order_notional, selected.best_ask, selected.lot_size)
-    sell_qty, sell_price = _quantity_for_notional(order_notional, selected.best_bid, selected.lot_size)
-    planned_gross = (buy_qty * buy_price) + (sell_qty * sell_price)
+    order_plan = _roundtrip_order_plan(
+        selected,
+        order_notional,
+        target_gross_volume,
+        level_size_fraction,
+    )
+    buy_qty = order_plan["buy_qty"]
+    buy_price = order_plan["buy_price"]
+    sell_qty = order_plan["sell_qty"]
+    sell_price = order_plan["sell_price"]
+    planned_gross = order_plan["planned_gross"]
+    print(f"planned_per_side_cap_usd={order_plan['per_side_cap']:.4f}")
     print(f"planned_buy_size={_fmt_decimal(buy_qty)}")
     print(f"planned_sell_size={_fmt_decimal(sell_qty)}")
     print(f"planned_buy_price={_fmt_decimal(buy_price)}")
@@ -181,11 +219,13 @@ def main() -> None:
         args=args,
         plan=plan,
         api_endpoint=api_endpoint,
+        wss_endpoint=wss_endpoint,
         environment=environment,
         credentials=credentials,
         order_notional=order_notional,
         target_gross_volume=target_gross_volume,
         max_spread_bps=max_spread_bps,
+        level_size_fraction=level_size_fraction,
         min_entry_delay_seconds=min_entry_delay_seconds,
     )
 
@@ -210,6 +250,11 @@ def _validate_live_args(
         raise SystemExit("--max-cycles must be <= 20 for this guarded live test")
     if min_entry_delay_seconds < 1:
         raise SystemExit("--min-entry-delay-seconds must be at least 1")
+
+
+def _validate_level_size_fraction(level_size_fraction: Decimal) -> None:
+    if level_size_fraction <= 0 or level_size_fraction > 1:
+        raise SystemExit("level_size_fraction must be greater than 0 and <= 1")
 
 
 def _select_candidate(
@@ -240,11 +285,13 @@ def _execute_live_loop(
     args: argparse.Namespace,
     plan: dict[str, object],
     api_endpoint: str,
+    wss_endpoint: str,
     environment: str,
     credentials: dict[str, str],
     order_notional: Decimal,
     target_gross_volume: Decimal,
     max_spread_bps: Decimal,
+    level_size_fraction: Decimal,
     min_entry_delay_seconds: float,
 ) -> None:
     adapter = HotstuffAdapter(
@@ -262,17 +309,45 @@ def _execute_live_loop(
 
     print("live_loop_start=True")
     print("live_volume_accounting=planned_buy_notional_plus_planned_sell_notional")
+    print("live_market_monitor=websocket_cache_with_rest_backup")
+
+    instruments = _load_instrument_map(api_endpoint, args.timeout_seconds)
+    specs = _hotstuff_market_specs(plan, max_spread_bps)
+    cache = SpreadCache()
+    rest_backoff = RestBackoff(
+        min_interval_seconds=args.rest_poll_min_interval_seconds,
+        default_backoff_seconds=args.rate_limit_backoff_seconds,
+    )
 
     def select_plan(remaining_gross_volume_usd: Decimal) -> RoundtripPlan | None:
-        selected = _select_candidate(api_endpoint, plan, max_spread_bps, args.timeout_seconds)
+        selected = _select_candidate_from_monitor(
+            args=args,
+            plan=plan,
+            api_endpoint=api_endpoint,
+            wss_endpoint=wss_endpoint,
+            instruments=instruments,
+            specs=specs,
+            cache=cache,
+            rest_backoff=rest_backoff,
+            max_spread_bps=max_spread_bps,
+        )
         if selected is None:
             return None
 
-        buy_qty, buy_price = _quantity_for_notional(order_notional, selected.best_ask, selected.lot_size)
-        sell_qty, sell_price = _quantity_for_notional(order_notional, selected.best_bid, selected.lot_size)
-        planned_gross = (buy_qty * buy_price) + (sell_qty * sell_price)
+        order_plan = _roundtrip_order_plan(
+            selected,
+            order_notional,
+            remaining_gross_volume_usd,
+            level_size_fraction,
+        )
+        buy_qty = order_plan["buy_qty"]
+        buy_price = order_plan["buy_price"]
+        sell_qty = order_plan["sell_qty"]
+        sell_price = order_plan["sell_price"]
+        planned_gross = order_plan["planned_gross"]
         print(
             f"selected_market={selected.market} spread_bps={selected.live_spread_bps:.4f} "
+            f"per_side_cap_usd={order_plan['per_side_cap']:.4f} "
             f"buy_size={_fmt_decimal(buy_qty)} sell_size={_fmt_decimal(sell_qty)} "
             f"planned_gross_volume_usd={planned_gross:.4f}"
         )
@@ -311,6 +386,79 @@ def _execute_live_loop(
     print(f"live_result_status={result.status}")
     print(f"live_result_planned_gross_volume_usd={result.planned_gross_volume_usd:.4f}")
     print(f"live_result_cycles={result.cycles}")
+
+
+def _hotstuff_market_specs(plan: dict[str, object], max_spread_bps: Decimal) -> list[MarketSpec]:
+    specs: list[MarketSpec] = []
+    for market in plan["markets"]:
+        if not isinstance(market, dict):
+            continue
+        symbol = str(market["market"])
+        specs.append(
+            MarketSpec(
+                exchange_id="hotstuff",
+                market=symbol,
+                average_spread_bps=Decimal(str(market["provided_24h_spread_bps"])),
+                max_spread_bps=max_spread_bps,
+                metadata=market,
+            ),
+        )
+    return specs
+
+
+def _select_candidate_from_monitor(
+    *,
+    args: argparse.Namespace,
+    plan: dict[str, object],
+    api_endpoint: str,
+    wss_endpoint: str,
+    instruments: dict[str, dict[str, object]],
+    specs: list[MarketSpec],
+    cache: SpreadCache,
+    rest_backoff: RestBackoff,
+    max_spread_bps: Decimal,
+) -> MarketCandidate | None:
+    refresh_hotstuff_spread_cache(
+        cache=cache,
+        specs=specs,
+        api_endpoint=api_endpoint,
+        wss_endpoint=wss_endpoint,
+        monitor_source=args.monitor_source,
+        cache_max_age_seconds=args.monitor_cache_max_age_seconds,
+        websocket_timeout_seconds=args.websocket_snapshot_timeout_seconds,
+        timeout_seconds=args.timeout_seconds,
+        rest_backoff=rest_backoff,
+    )
+    selection = select_lowest_spread(cache, specs, max_age_seconds=args.monitor_cache_max_age_seconds)
+    print(f"eligible_market_count={len(selection.accepted)}")
+    for spec, snapshot in selection.accepted:
+        print(
+            f"candidate={spec.market} eligible=True source={snapshot.source} "
+            f"spread_bps={snapshot.spread_bps:.4f} reason=spread_ok"
+        )
+    for spec, reason in selection.rejected:
+        snapshot = cache.get(spec.exchange_id, spec.market)
+        spread = f"{snapshot.spread_bps:.4f}" if snapshot is not None else "unknown"
+        print(f"candidate={spec.market} eligible=False source=cache spread_bps={spread} reason={reason}")
+    if selection.selected is None:
+        return None
+
+    selected_spec, cached_snapshot = selection.selected
+    print(
+        f"selected_market_from_cache={selected_spec.market} "
+        f"source={cached_snapshot.source} spread_bps={cached_snapshot.spread_bps:.4f}"
+    )
+
+    fresh_market = dict(selected_spec.metadata)
+    fresh = _candidate_from_live_orderbook(api_endpoint, fresh_market, instruments, max_spread_bps, args.timeout_seconds)
+    print(
+        f"fresh_verify_market={fresh.market} eligible={fresh.eligible} "
+        f"spread_bps={fresh.live_spread_bps:.4f} reason={fresh.reason}"
+    )
+    if not fresh.eligible:
+        print("selected_plan_skipped=fresh_verify_failed")
+        return None
+    return fresh
 
 
 def _account_summary_ok(api_endpoint: str, credential_prefix: str, environment: str, timeout_seconds: float) -> bool:
@@ -416,6 +564,37 @@ def _quantity_for_notional(notional: Decimal, price: Decimal, lot_size: Decimal)
     if price <= 0 or lot_size <= 0:
         return Decimal("0"), price
     return _round_down_to_step(notional / price, lot_size), price
+
+
+def _roundtrip_order_plan(
+    selected: MarketCandidate,
+    order_notional: Decimal,
+    remaining_gross_volume_usd: Decimal,
+    level_size_fraction: Decimal,
+) -> dict[str, Decimal]:
+    best_bid_notional = selected.best_bid * selected.best_bid_size
+    best_ask_notional = selected.best_ask * selected.best_ask_size
+    liquidity_cap = min(best_bid_notional, best_ask_notional) * level_size_fraction
+    per_side_cap = min(order_notional, remaining_gross_volume_usd / Decimal("2"), liquidity_cap)
+    if per_side_cap <= 0:
+        return {
+            "per_side_cap": Decimal("0"),
+            "buy_qty": Decimal("0"),
+            "buy_price": selected.best_ask,
+            "sell_qty": Decimal("0"),
+            "sell_price": selected.best_bid,
+            "planned_gross": Decimal("0"),
+        }
+    buy_qty, buy_price = _quantity_for_notional(per_side_cap, selected.best_ask, selected.lot_size)
+    sell_qty, sell_price = _quantity_for_notional(per_side_cap, selected.best_bid, selected.lot_size)
+    return {
+        "per_side_cap": per_side_cap,
+        "buy_qty": buy_qty,
+        "buy_price": buy_price,
+        "sell_qty": sell_qty,
+        "sell_price": sell_price,
+        "planned_gross": (buy_qty * buy_price) + (sell_qty * sell_price),
+    }
 
 
 def _round_down_to_step(value: Decimal, step: Decimal) -> Decimal:

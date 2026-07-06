@@ -35,6 +35,23 @@ The core runner lives at:
 
 The core runner does not import Hotstuff or Hibachi SDKs directly. Exchange-specific order submission belongs inside adapters.
 
+## SDK Runtime
+
+SDK and WebSocket dependencies are pinned in:
+
+```text
+requirements.txt
+```
+
+Setup notes for the development computer and future execution server are in:
+
+```text
+docs/runtime-setup.md
+```
+
+The execution server should install the same dependency file, but keep its own
+server-local `.env`, `data/`, and `logs/`. Secrets do not move through Git.
+
 ## Hotstuff Env Model
 
 Hotstuff uses an owner account wallet plus an API Wallet / agent signer:

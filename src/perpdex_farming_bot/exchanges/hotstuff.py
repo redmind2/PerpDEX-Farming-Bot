@@ -86,9 +86,12 @@ class HotstuffAdapter:
         buy_size: Decimal,
         sell_size: Decimal,
         planned_gross_volume_usd: Decimal,
+        first_side: str = "BUY",
+        second_side: str = "SELL",
     ) -> PairedRoundtripResult:
         from hotstuff import PlaceOrderParams, UnitOrder
 
+        del first_side, second_side
         client = self._exchange_client()
         orders = [
             UnitOrder(

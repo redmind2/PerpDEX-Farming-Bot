@@ -8,12 +8,10 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, ROUND_DOWN
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any, Literal
 
 from perpdex_farming_bot.budget import current_weekly_window
 from perpdex_farming_bot.cli.hibachi_live_roundtrip import (
-    _execute_paired_market_batch,
     _paired_market_sides,
     _position_state,
 )
@@ -23,12 +21,16 @@ from perpdex_farming_bot.connectors.hibachi_readonly import (
     endpoint_from_env,
 )
 from perpdex_farming_bot.connectors.hibachi_sdk_public import load_hibachi_orderbook_snapshot
+from perpdex_farming_bot.core import RoundtripPlan, execute_roundtrip_plan
 from perpdex_farming_bot.credentials import (
     hibachi_available_credential_env,
     hibachi_missing_required,
     read_hibachi_credentials,
 )
 from perpdex_farming_bot.env import get_env, load_dotenv_if_present
+from perpdex_farming_bot.marketdata import MarketSpec, RestBackoff, SpreadCache
+from perpdex_farming_bot.marketdata.hibachi import refresh_hibachi_spread_cache
+from perpdex_farming_bot.exchanges.hibachi import HibachiAdapter
 from perpdex_farming_bot.security.secrets import assert_no_plaintext_secrets
 from perpdex_farming_bot.storage import WeeklyLedger
 
@@ -111,6 +113,11 @@ def main() -> None:
     )
     parser.add_argument("--max-fees-percent", type=Decimal, default=Decimal("0.0005"))
     parser.add_argument("--min-entry-delay-seconds", type=float, default=1.0)
+    parser.add_argument("--monitor-source", choices=("auto", "websocket", "rest"), default="auto")
+    parser.add_argument("--monitor-cache-max-age-seconds", type=float, default=2.0)
+    parser.add_argument("--websocket-snapshot-timeout-seconds", type=float, default=0.8)
+    parser.add_argument("--rest-poll-min-interval-seconds", type=float, default=0.1)
+    parser.add_argument("--rate-limit-backoff-seconds", type=float, default=5.0)
     parser.add_argument("--max-cycles-per-phase", type=int, default=150)
     parser.add_argument("--max-idle-cycles", type=int, default=120)
     parser.add_argument("--fill-lookup-attempts", type=int, default=5)
@@ -200,7 +207,11 @@ def main() -> None:
     print(f"level_size_fraction={sizing.level_size_fraction}")
     print(f"market_order_liquidity_safety_fraction={sizing.market_order_liquidity_safety_fraction}")
     print("live_orderbook_check=before_every_live_batch")
-    print("live_orderbook_source=hibachi_public_sdk")
+    print("live_orderbook_source=websocket_cache_with_rest_backup")
+    print(f"monitor_source={args.monitor_source}")
+    print(f"monitor_cache_max_age_seconds={args.monitor_cache_max_age_seconds}")
+    print(f"websocket_snapshot_timeout_seconds={args.websocket_snapshot_timeout_seconds}")
+    print("fresh_orderbook_verify=selected_market_only_before_order")
     print(f"continue_after_residual_close={args.continue_after_residual_close}")
 
     if not runs:
@@ -777,6 +788,44 @@ def _effective_liquidity_safety_fraction(sizing: ExecutionSizing, run: MarketRun
     return run.market_order_liquidity_safety_fraction or sizing.market_order_liquidity_safety_fraction
 
 
+def _market_spec_for_run(run: MarketRun) -> MarketSpec:
+    return MarketSpec(
+        exchange_id=run.exchange_id,
+        market=run.market,
+        average_spread_bps=run.average_spread_bps,
+        max_spread_bps=run.max_allowed_spread_bps,
+        metadata=run,
+    )
+
+
+def _refresh_hibachi_monitor_cache(
+    args: argparse.Namespace,
+    phase_markets: list[MarketRun],
+    specs: list[MarketSpec],
+    cache: SpreadCache,
+    rest_backoff: RestBackoff,
+) -> None:
+    data_api_endpoint = endpoint_from_env(
+        get_env("HIBACHI_DATA_API_ENDPOINT_PRODUCTION"),
+        DEFAULT_HIBACHI_DATA_API_ENDPOINT,
+    )
+    granularity_by_market = {
+        run.market: args.orderbook_granularity if args.orderbook_granularity > 0 else run.orderbook_granularity
+        for run in phase_markets
+    }
+    refresh_hibachi_spread_cache(
+        cache=cache,
+        specs=specs,
+        data_api_endpoint=data_api_endpoint,
+        monitor_source=args.monitor_source,
+        cache_max_age_seconds=args.monitor_cache_max_age_seconds,
+        websocket_timeout_seconds=args.websocket_snapshot_timeout_seconds,
+        depth=args.orderbook_depth,
+        granularity_by_market=granularity_by_market,
+        rest_backoff=rest_backoff,
+    )
+
+
 def _run_live_phase(
     args: argparse.Namespace,
     sizing: ExecutionSizing,
@@ -789,6 +838,16 @@ def _run_live_phase(
 ) -> Decimal:
     live_gross_volume = Decimal("0")
     idle_cycles = 0
+    cache = SpreadCache()
+    specs = [_market_spec_for_run(run) for run in phase_markets]
+    adapters = {
+        prefix: HibachiAdapter(prefix, args.max_fees_percent, client)
+        for prefix, client in clients.items()
+    }
+    rest_backoff = RestBackoff(
+        min_interval_seconds=args.rest_poll_min_interval_seconds,
+        default_backoff_seconds=args.rate_limit_backoff_seconds,
+    )
 
     print(f"phase_live_start={phase_label}")
     print(f"phase={phase_label} target_volume_usd={phase_target_volume_usd:.4f}")
@@ -807,24 +866,24 @@ def _run_live_phase(
         time.sleep(args.min_entry_delay_seconds)
 
         remaining = phase_target_volume_usd - live_gross_volume
+        _refresh_hibachi_monitor_cache(args, phase_markets, specs, cache, rest_backoff)
         candidates: list[MarketCandidate] = []
-        saw_rate_limit = False
         for run in phase_markets:
-            snapshot_result = _load_snapshot(args, run)
-            if not snapshot_result.ok or snapshot_result.snapshot is None:
+            cached = cache.fresh(run.exchange_id, run.market, args.monitor_cache_max_age_seconds)
+            if cached is None:
                 print(
                     f"phase={phase_label} cycle={cycle} market={run.market} "
-                    f"market_data_ok=False reason={snapshot_result.reason}"
+                    f"market_data_ok=False reason=monitor_cache_missing_or_stale"
                 )
-                saw_rate_limit = saw_rate_limit or _rate_limited(snapshot_result.reason)
                 continue
 
-            snapshot = snapshot_result.snapshot
+            snapshot = cached.to_market_snapshot(average_spread_bps=run.average_spread_bps)
             allowed, reason = _spread_allowed(run, snapshot)
             round_plan = _round_plan(sizing, run, snapshot, remaining)
             print(
                 f"phase={phase_label} cycle={cycle} market={run.market} market_data_ok=True "
-                f"trade_allowed={allowed} orderbook_checked_at_utc={_snapshot_timestamp(snapshot)} "
+                f"trade_allowed={allowed} orderbook_source={cached.source} "
+                f"orderbook_checked_at_utc={_snapshot_timestamp(snapshot)} "
                 f"spread_bps={Decimal(str(snapshot.spread_bps)):.4f} "
                 f"average_spread_bps={Decimal(str(snapshot.average_spread_bps)):.4f} "
                 f"max_allowed_spread_bps={run.max_allowed_spread_bps:.4f} reason={reason} "
@@ -843,40 +902,72 @@ def _run_live_phase(
 
         if not candidates:
             idle_cycles += 1
-            if saw_rate_limit:
-                print(f"phase={phase_label} stop_reason=rate_limited_public_orderbook")
-                return live_gross_volume
             if idle_cycles >= args.max_idle_cycles:
                 print(f"phase={phase_label} stop_reason=max_idle_cycles_reached:{idle_cycles}")
                 return live_gross_volume
             continue
 
         idle_cycles = 0
-        selected = min(candidates, key=lambda item: (item.spread_ratio, str(item.run.market)))
+        selected = min(
+            candidates,
+            key=lambda item: (Decimal(str(item.snapshot.spread_bps)), item.spread_ratio, str(item.run.market)),
+        )
         run = selected.run
         snapshot = selected.snapshot
         round_plan = selected.plan
         print(
             f"phase={phase_label} cycle={cycle} selected_market={run.market} "
-            f"selection_rule=lowest_spread_to_threshold_ratio "
+            f"selection_rule=lowest_live_spread_bps "
             f"spread_ratio={selected.spread_ratio:.6f} "
-            f"orderbook_check_timing=immediately_before_live_batch "
+            f"orderbook_check_timing=cache_then_selected_market_fresh_verify "
             f"first_side={round_plan.first_side} second_side={round_plan.second_side}"
         )
 
-        assignment = SimpleNamespace(market=run.market)
+        fresh_result = _load_snapshot(args, run)
+        if not fresh_result.ok or fresh_result.snapshot is None:
+            idle_cycles += 1
+            print(
+                f"phase={phase_label} cycle={cycle} selected_market={run.market} "
+                f"fresh_verify_ok=False reason={fresh_result.reason}"
+            )
+            if _rate_limited(fresh_result.reason):
+                rest_backoff.note_rate_limited()
+                print(f"phase={phase_label} cycle={cycle} fresh_verify_backoff=True")
+            continue
+        snapshot = fresh_result.snapshot
+        allowed, reason = _spread_allowed(run, snapshot)
+        round_plan = _round_plan(sizing, run, snapshot, remaining)
+        print(
+            f"phase={phase_label} cycle={cycle} selected_market={run.market} "
+            f"fresh_verify_ok=True spread_bps={Decimal(str(snapshot.spread_bps)):.4f} "
+            f"reason={reason} quantity={round_plan.quantity} "
+            f"one_side_notional_usd={round_plan.notional_usd:.4f}"
+        )
+        if not allowed or round_plan.quantity <= Decimal("0"):
+            idle_cycles += 1
+            print(f"phase={phase_label} cycle={cycle} selected_plan_skipped=fresh_verify_failed_or_quantity_zero")
+            continue
+
         try:
-            status = _execute_paired_market_batch(
-                clients[run.wallet.credential_prefix],
-                assignment,
-                args,
-                round_plan.quantity,
-                round_plan.first_side,
-                round_plan.second_side,
+            result = execute_roundtrip_plan(
+                adapters[run.wallet.credential_prefix],
+                RoundtripPlan(
+                    market=run.market,
+                    instrument_id=0,
+                    buy_price=Decimal(str(snapshot.best_ask.price)),
+                    sell_price=Decimal(str(snapshot.best_bid.price)),
+                    buy_size=round_plan.quantity,
+                    sell_size=round_plan.quantity,
+                    planned_gross_volume_usd=round_plan.notional_usd * Decimal("2"),
+                    first_side=round_plan.first_side,
+                    second_side=round_plan.second_side,
+                    reason="hibachi_weekly_lowest_live_spread",
+                ),
             )
         except Exception as exc:
             print(f"phase={phase_label} stop_reason=live_execution_exception:{exc.__class__.__name__}")
             return live_gross_volume
+        status = result.status
         recorded_status = status
         if status == "residual_closed_stop_for_review" and args.continue_after_residual_close:
             print(f"phase={phase_label} cycle={cycle} residual_closed_continue=True")

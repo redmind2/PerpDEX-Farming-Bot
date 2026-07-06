@@ -4,7 +4,7 @@ import argparse
 import json
 import math
 from dataclasses import dataclass
-from decimal import Decimal, ROUND_UP
+from decimal import Decimal, ROUND_DOWN, ROUND_UP
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 
@@ -61,7 +61,10 @@ def main() -> None:
     order_notional = Decimal(str(plan["order_notional_usd"]))
     target_gross_volume = Decimal(str(plan["target_gross_volume_usd"]))
     max_spread_bps = Decimal(str(plan["max_spread_bps"]))
+    level_size_fraction = Decimal(str(plan.get("level_size_fraction", "0.5")))
     delay_seconds = Decimal(str(plan["min_entry_delay_seconds"]))
+    if level_size_fraction <= 0 or level_size_fraction > 1:
+        raise SystemExit("level_size_fraction must be greater than 0 and <= 1")
 
     print("hotstuff_live_preflight=read_only_no_orders")
     print(f"env_file_loaded={env_loaded}")
@@ -75,6 +78,11 @@ def main() -> None:
     print(f"order_notional_usd={order_notional}")
     print(f"target_gross_volume_usd={target_gross_volume}")
     print(f"max_spread_bps={max_spread_bps}")
+    print(f"level_size_fraction={level_size_fraction}")
+    print(
+        "order_sizing_rule="
+        "min(order_notional_usd, remaining_gross_volume_usd/2, smaller_best_bid_or_ask_level_notional*level_size_fraction)"
+    )
     print(f"min_entry_delay_seconds={delay_seconds}")
 
     account_env = hotstuff_available_private_readonly_env(args.credential_prefix, environment)
@@ -104,6 +112,8 @@ def main() -> None:
         print(f"  provided_24h_spread_bps={candidate.provided_24h_spread_bps}")
         print(f"  live_best_bid={candidate.best_bid}")
         print(f"  live_best_ask={candidate.best_ask}")
+        print(f"  live_best_bid_size={candidate.best_bid_size}")
+        print(f"  live_best_ask_size={candidate.best_ask_size}")
         print(f"  live_spread_bps={candidate.live_spread_bps:.4f}")
         print(f"  eligible={candidate.eligible}")
         print(f"  reason={candidate.reason}")
@@ -115,9 +125,15 @@ def main() -> None:
         return
 
     selected = sorted(eligible, key=lambda item: (item.live_spread_bps, item.provided_current_spread_bps, item.market))[0]
+    order_plan = _roundtrip_order_plan(
+        selected,
+        order_notional,
+        target_gross_volume,
+        level_size_fraction,
+    )
     one_way_cycles = int(math.ceil(target_gross_volume / order_notional)) if order_notional > 0 else 0
-    roundtrip_gross_volume = order_notional * Decimal("2")
-    roundtrip_cycles = int((target_gross_volume / roundtrip_gross_volume).to_integral_value(rounding=ROUND_UP))
+    planned_gross = order_plan["planned_gross"]
+    roundtrip_cycles = int((target_gross_volume / planned_gross).to_integral_value(rounding=ROUND_UP)) if planned_gross > 0 else 0
 
     print("selected_market=" + selected.market)
     print(f"selected_instrument_id={selected.instrument_id}")
@@ -128,12 +144,17 @@ def main() -> None:
     print(f"selected_24h_threshold_bps={selected.provided_24h_spread_bps}")
     print(f"selected_best_bid={selected.best_bid}")
     print(f"selected_best_ask={selected.best_ask}")
+    print(f"selected_best_bid_size={selected.best_bid_size}")
+    print(f"selected_best_ask_size={selected.best_ask_size}")
     print(f"planned_order_notional_usd={order_notional}")
+    print(f"planned_per_side_cap_usd={order_plan['per_side_cap']:.4f}")
+    print(f"planned_buy_size={order_plan['buy_qty']}")
+    print(f"planned_sell_size={order_plan['sell_qty']}")
+    print(f"planned_cycle_gross_volume_usd={planned_gross:.4f}")
     print(f"planned_target_gross_volume_usd={target_gross_volume}")
     print(f"planned_one_way_order_count_to_target={one_way_cycles}")
     print(f"planned_roundtrip_cycles_to_target_if_buy_sell={roundtrip_cycles}")
-    print("live_execution_ready=False")
-    print("live_execution_blocker=Hotstuff order signing/exchange client not implemented in this repo yet")
+    print("live_execution_ready=requires_hotstuff_live_test_confirmation")
     print("preflight_ready=True")
 
 
@@ -233,6 +254,39 @@ def _load_instrument_map(api_endpoint: str, timeout_seconds: float) -> dict[str,
         if name:
             result[name] = item
     return result
+
+
+def _roundtrip_order_plan(
+    selected: MarketCandidate,
+    order_notional: Decimal,
+    remaining_gross_volume_usd: Decimal,
+    level_size_fraction: Decimal,
+) -> dict[str, Decimal]:
+    best_bid_notional = selected.best_bid * selected.best_bid_size
+    best_ask_notional = selected.best_ask * selected.best_ask_size
+    liquidity_cap = min(best_bid_notional, best_ask_notional) * level_size_fraction
+    per_side_cap = min(order_notional, remaining_gross_volume_usd / Decimal("2"), liquidity_cap)
+    if per_side_cap <= 0:
+        return {
+            "per_side_cap": Decimal("0"),
+            "buy_qty": Decimal("0"),
+            "sell_qty": Decimal("0"),
+            "planned_gross": Decimal("0"),
+        }
+    buy_qty = _round_down_to_step(per_side_cap / selected.best_ask, selected.lot_size)
+    sell_qty = _round_down_to_step(per_side_cap / selected.best_bid, selected.lot_size)
+    return {
+        "per_side_cap": per_side_cap,
+        "buy_qty": buy_qty,
+        "sell_qty": sell_qty,
+        "planned_gross": (buy_qty * selected.best_ask) + (sell_qty * selected.best_bid),
+    }
+
+
+def _round_down_to_step(value: Decimal, step: Decimal) -> Decimal:
+    if step <= 0:
+        return value
+    return (value / step).to_integral_value(rounding=ROUND_DOWN) * step
 
 
 def _print_account_summary_status(

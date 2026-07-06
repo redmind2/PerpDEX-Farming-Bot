@@ -26,7 +26,7 @@
     "wallet_role": "fx",
     "volume_accounting": "phase_total",
     "target_multiplier": 1.05,
-    "target_weekly_volume_usd": 10000,
+    "target_weekly_volume_usd": 1000,
     "test_target_note": "Live-test target is intentionally below Hibachi's first FX multiplier tier.",
     "tiers": [
       {
@@ -54,9 +54,13 @@
       {
         "market": "EUR/USDT-P",
         "enabled": true,
-        "spread_threshold_source": "7d_average_bps",
-        "fallback_average_spread_bps": 1.04,
-        "max_allowed_spread_bps": 1.04
+        "spread_threshold_source": "user_provided_24h_average_bps_2026_07_06_1434_kst",
+        "provided_current_spread_bps": 0.87,
+        "provided_5m_spread_bps": 0.87,
+        "provided_1h_spread_bps": 0.90,
+        "provided_24h_spread_bps": 0.94,
+        "fallback_average_spread_bps": 0.94,
+        "max_allowed_spread_bps": 0.94
       },
       {
         "market": "GBP/USDT-P",
@@ -85,15 +89,52 @@
     "enabled": true,
     "account_type": "crypto",
     "wallet_role": "crypto",
-    "target_weekly_volume_usd": 10000,
+    "target_weekly_volume_usd": 1000,
     "starts_after": "fx_test_target_reached",
     "markets": [
       {
         "market": "BTC/USDT-P",
         "enabled": true,
-        "spread_threshold_source": "7d_average_bps",
-        "fallback_average_spread_bps": 0.16,
-        "max_allowed_spread_bps": 0.16
+        "spread_threshold_source": "user_provided_24h_average_bps_2026_07_06_1434_kst",
+        "provided_current_spread_bps": 0.05,
+        "provided_5m_spread_bps": 0.03,
+        "provided_1h_spread_bps": 0.04,
+        "provided_24h_spread_bps": 0.06,
+        "fallback_average_spread_bps": 0.06,
+        "max_allowed_spread_bps": 0.06
+      },
+      {
+        "market": "ETH/USDT-P",
+        "enabled": true,
+        "spread_threshold_source": "user_provided_24h_average_bps_2026_07_06_1434_kst",
+        "provided_current_spread_bps": 6.22,
+        "provided_5m_spread_bps": 4.53,
+        "provided_1h_spread_bps": 2.04,
+        "provided_24h_spread_bps": 1.63,
+        "fallback_average_spread_bps": 1.63,
+        "max_allowed_spread_bps": 1.63
+      },
+      {
+        "market": "HYPE/USDT-P",
+        "enabled": true,
+        "spread_threshold_source": "user_provided_24h_average_bps_2026_07_06_1434_kst",
+        "provided_current_spread_bps": 28.25,
+        "provided_5m_spread_bps": 28.27,
+        "provided_1h_spread_bps": 17.01,
+        "provided_24h_spread_bps": 19.10,
+        "fallback_average_spread_bps": 19.10,
+        "max_allowed_spread_bps": 19.10
+      },
+      {
+        "market": "SOL/USDT-P",
+        "enabled": true,
+        "spread_threshold_source": "user_provided_24h_average_bps_2026_07_06_1434_kst",
+        "provided_current_spread_bps": 12.46,
+        "provided_5m_spread_bps": 12.47,
+        "provided_1h_spread_bps": 15.05,
+        "provided_24h_spread_bps": 14.34,
+        "fallback_average_spread_bps": 14.34,
+        "max_allowed_spread_bps": 14.34
       }
     ]
   },

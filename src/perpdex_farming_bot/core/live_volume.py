@@ -17,6 +17,8 @@ class RoundtripPlan:
     buy_size: Decimal
     sell_size: Decimal
     planned_gross_volume_usd: Decimal
+    first_side: str = "BUY"
+    second_side: str = "SELL"
     reason: str = "selected"
 
 
@@ -92,15 +94,7 @@ def run_paired_volume(
             f"planned_gross_volume_usd={plan.planned_gross_volume_usd:.4f}"
         )
         emit(f"cycle={cycle} live_submit=True")
-        result = adapter.execute_paired_notional_roundtrip(
-            market=plan.market,
-            instrument_id=plan.instrument_id,
-            buy_price=plan.buy_price,
-            sell_price=plan.sell_price,
-            buy_size=plan.buy_size,
-            sell_size=plan.sell_size,
-            planned_gross_volume_usd=plan.planned_gross_volume_usd,
-        )
+        result = execute_roundtrip_plan(adapter, plan)
         results.append(result)
         emit(f"cycle={cycle} adapter_status={result.status}")
         if not result.success:
@@ -118,3 +112,17 @@ def run_paired_volume(
 
     emit(f"stop_reason=max_cycles_reached:{config.max_cycles}")
     return VolumeRunResult("max_cycles_reached", live_gross_volume, config.max_cycles, tuple(results))
+
+
+def execute_roundtrip_plan(adapter: ExchangeAdapter, plan: RoundtripPlan) -> PairedRoundtripResult:
+    return adapter.execute_paired_notional_roundtrip(
+        market=plan.market,
+        instrument_id=plan.instrument_id,
+        buy_price=plan.buy_price,
+        sell_price=plan.sell_price,
+        buy_size=plan.buy_size,
+        sell_size=plan.sell_size,
+        planned_gross_volume_usd=plan.planned_gross_volume_usd,
+        first_side=plan.first_side,
+        second_side=plan.second_side,
+    )

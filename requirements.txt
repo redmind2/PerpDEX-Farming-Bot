@@ -1,0 +1,8 @@
+# Runtime dependencies for PerpDEX Farming Bot.
+# Use Python 3.13 on the execution server unless a newer server runtime is
+# explicitly tested, because Hibachi currently requires Python >=3.13 and
+# Hotstuff's published SDK classifiers cover Python up to 3.13.
+hibachi-xyz==0.3.1
+hotstuff-python-sdk==0.1.1b4
+eth-account>=0.13,<0.14
+websockets==16.0

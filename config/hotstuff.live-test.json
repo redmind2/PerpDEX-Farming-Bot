@@ -6,64 +6,66 @@
   "order_notional_usd": 100,
   "target_gross_volume_usd": 1000,
   "max_spread_bps": 1,
+  "level_size_fraction": 0.5,
   "min_entry_delay_seconds": 1,
-  "volume_accounting_note": "If later implemented as paired buy+sell market roundtrips, a $100 order on each side is about $200 gross volume per cycle.",
+  "order_sizing_rule": "min(order_notional_usd, remaining_gross_volume_usd/2, smaller_best_bid_or_ask_level_notional*level_size_fraction)",
+  "volume_accounting_note": "Paired buy+sell roundtrips count planned buy notional plus planned sell notional. Per-side notional is capped by order_notional_usd, remaining target, and best-level liquidity.",
   "markets": [
     {
       "market": "BRENTOIL-PERP",
-      "provided_current_spread_bps": 12.43,
-      "provided_5m_spread_bps": 11.74,
-      "provided_1h_spread_bps": 8.68,
-      "provided_24h_spread_bps": 3.23
+      "provided_current_spread_bps": 1.39,
+      "provided_5m_spread_bps": 2.08,
+      "provided_1h_spread_bps": 1.62,
+      "provided_24h_spread_bps": 1.70
     },
     {
       "market": "BTC-PERP",
-      "provided_current_spread_bps": 0.16,
-      "provided_5m_spread_bps": 0.16,
-      "provided_1h_spread_bps": 0.18,
-      "provided_24h_spread_bps": 0.29
+      "provided_current_spread_bps": 0.48,
+      "provided_5m_spread_bps": 0.48,
+      "provided_1h_spread_bps": 0.19,
+      "provided_24h_spread_bps": 0.41
     },
     {
       "market": "ETH-PERP",
-      "provided_current_spread_bps": 0.57,
-      "provided_5m_spread_bps": 0.71,
-      "provided_1h_spread_bps": 2.15,
-      "provided_24h_spread_bps": 1.3
+      "provided_current_spread_bps": 2.26,
+      "provided_5m_spread_bps": 2.26,
+      "provided_1h_spread_bps": 1.43,
+      "provided_24h_spread_bps": 1.29
     },
     {
       "market": "GOLD-PERP",
       "provided_current_spread_bps": 0.24,
       "provided_5m_spread_bps": 0.24,
-      "provided_1h_spread_bps": 0.24,
-      "provided_24h_spread_bps": 0.25
+      "provided_1h_spread_bps": 0.25,
+      "provided_24h_spread_bps": 0.27
     },
     {
       "market": "HYPE-PERP",
-      "provided_current_spread_bps": 0.42,
-      "provided_5m_spread_bps": 0.39,
-      "provided_1h_spread_bps": 3.22,
-      "provided_24h_spread_bps": 3.59
+      "provided_current_spread_bps": 0.28,
+      "provided_5m_spread_bps": 1.20,
+      "provided_1h_spread_bps": 3.00,
+      "provided_24h_spread_bps": 1.80
     },
     {
       "market": "SILVER-PERP",
       "provided_current_spread_bps": 0.16,
       "provided_5m_spread_bps": 0.16,
-      "provided_1h_spread_bps": 0.16,
-      "provided_24h_spread_bps": 0.17
+      "provided_1h_spread_bps": 0.26,
+      "provided_24h_spread_bps": 0.42
     },
     {
       "market": "SOL-PERP",
-      "provided_current_spread_bps": 1.72,
-      "provided_5m_spread_bps": 1.47,
-      "provided_1h_spread_bps": 1.49,
-      "provided_24h_spread_bps": 3.33
+      "provided_current_spread_bps": 5.73,
+      "provided_5m_spread_bps": 2.55,
+      "provided_1h_spread_bps": 1.87,
+      "provided_24h_spread_bps": 2.60
     },
     {
       "market": "WTIOIL-PERP",
-      "provided_current_spread_bps": 2.9,
-      "provided_5m_spread_bps": 2.9,
-      "provided_1h_spread_bps": 2.86,
-      "provided_24h_spread_bps": 1.69
+      "provided_current_spread_bps": 1.45,
+      "provided_5m_spread_bps": 4.36,
+      "provided_1h_spread_bps": 1.94,
+      "provided_24h_spread_bps": 1.71
     }
   ]
 }
