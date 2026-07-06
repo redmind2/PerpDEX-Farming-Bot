@@ -19,8 +19,13 @@ Current SDK policy:
 - RiseX SDK note: official docs point to `risex-client`, an unofficial
   community TypeScript SDK. This Python repo uses direct read-only REST and
   WebSocket skeletons first.
+- Pacifica SDK note: official docs point to `pacifica-fi/python-sdk`, a Python
+  examples repo for REST/WebSocket and signed order operations. This repo uses
+  direct REST/WebSocket code and adds only the signing libraries needed for the
+  guarded Pacifica dry-run/live-test CLI.
 - Hotstuff signer helper: `eth-account>=0.13,<0.14`
 - WebSocket market monitor: `websockets==16.0`
+- Pacifica signer helper: `base58>=2.1.1,<3` and `solders>=0.26,<0.27`
 
 Prefer Python 3.13 for the execution server. Hibachi requires Python 3.13 or
 newer, and Hotstuff's published SDK metadata currently lists Python support up
@@ -78,6 +83,7 @@ python -m compileall src
 python -m perpdex_farming_bot.cli.check_hibachi_env
 python -m perpdex_farming_bot.cli.check_hotstuff_env
 python -m perpdex_farming_bot.cli.check_risex_env --environment testnet
+python -m perpdex_farming_bot.cli.check_pacifica_env --environment testnet
 ```
 
 Read-only network checks:
@@ -88,7 +94,30 @@ python -m perpdex_farming_bot.cli.hibachi_sdk_smoke --network --public --symbol 
 python -m perpdex_farming_bot.cli.hotstuff_readonly_smoke --environment production --network
 python -m perpdex_farming_bot.cli.risex_readonly_smoke --environment testnet --network --public --public-check markets
 python -m perpdex_farming_bot.cli.risex_readonly_smoke --environment testnet --network --public --public-check orderbook --market-id 1
+python -m perpdex_farming_bot.cli.pacifica_readonly_smoke --environment testnet --network --public --public-check markets
+python -m perpdex_farming_bot.cli.pacifica_readonly_smoke --environment testnet --network --public --public-check orderbook --symbol BTC --agg-level 1
 ```
+
+Pacifica guarded live-test preparation:
+
+```powershell
+$env:PYTHONPATH="src"
+python -m perpdex_farming_bot.cli.pacifica_live_preflight --environment testnet
+python -m perpdex_farming_bot.cli.pacifica_live_preflight --environment testnet --network --symbol BTC --max-notional-usd 15
+python -m perpdex_farming_bot.cli.pacifica_live_test --environment testnet --network --symbol BTC --max-notional-usd 15
+```
+
+RiseX guarded dry-run preparation, no live order:
+
+```powershell
+$env:PYTHONPATH="src"
+python -m perpdex_farming_bot.cli.risex_live_preflight --environment production --network --market-id 1 --max-notional-usd 10
+python -m perpdex_farming_bot.cli.risex_live_volume --environment production --network --market-ids 1,2,4,5 --target-gross-volume-usd 20 --max-leg-notional-usd 10 --spread-bps 1 --book-fraction 0.5 --fast-close-on-fill --prebuild-close-order
+```
+
+The RiseX volume dry-run emits `execution_event_json={...}` for future
+Telegram/GUI/SQLite readers. Do not add `--execute-live` unless the operator has
+explicitly approved a tiny live test in the current session.
 
 Only after env, public read-only, private read-only, paper-only, and dry-run are
 clean should live trading be enabled with the explicit CLI confirmation string.

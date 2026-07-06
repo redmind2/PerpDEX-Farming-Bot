@@ -16,6 +16,8 @@ HOTSTUFF_PRIVATE_READONLY_FIELDS = ("ACCOUNT_ADDRESS",)
 HOTSTUFF_SIGNING_FIELDS = ("SIGNER_ADDRESS", "SIGNER_PRIVATE_KEY")
 RISEX_PRIVATE_READONLY_FIELDS = ("ACCOUNT_ADDRESS",)
 RISEX_SIGNING_FIELDS = ("SIGNER_ADDRESS", "SIGNER_PRIVATE_KEY")
+PACIFICA_PRIVATE_READONLY_FIELDS = ("ACCOUNT_ADDRESS",)
+PACIFICA_SIGNING_FIELDS = ("API_AGENT_PUBLIC_KEY", "API_AGENT_PRIVATE_KEY")
 
 
 @dataclass(frozen=True)
@@ -218,6 +220,75 @@ def read_risex_credentials(prefix: str, environment: str = "TESTNET") -> dict[st
 
 
 def _risex_credential_environment(environment: str) -> str:
+    normalized = normalize_env_prefix(environment)
+    if normalized in {"MAINNET", "PROD", "PRODUCTION"}:
+        return "PRODUCTION"
+    if normalized in {"TEST", "TESTNET"}:
+        return "TESTNET"
+    return normalized
+
+
+@dataclass(frozen=True)
+class PacificaCredentialEnv:
+    prefix: str
+    environment: str
+    account_address: str
+    api_agent_public_key: str
+    api_agent_private_key: str
+
+    @property
+    def private_readonly_names(self) -> tuple[str, ...]:
+        return (self.account_address,)
+
+    @property
+    def signing_names(self) -> tuple[str, ...]:
+        return (self.api_agent_public_key, self.api_agent_private_key)
+
+
+def pacifica_credential_env(prefix: str, environment: str = "TESTNET") -> PacificaCredentialEnv:
+    canonical = normalize_env_prefix(prefix)
+    env = _pacifica_credential_environment(environment)
+    return PacificaCredentialEnv(
+        prefix=canonical,
+        environment=env,
+        account_address=env_name(canonical, "ACCOUNT_ADDRESS", env),
+        api_agent_public_key=env_name(canonical, "API_AGENT_PUBLIC_KEY", env),
+        api_agent_private_key=env_name(canonical, "API_AGENT_PRIVATE_KEY", env),
+    )
+
+
+def pacifica_available_private_readonly_env(prefix: str, environment: str = "TESTNET") -> PacificaCredentialEnv | None:
+    candidate = pacifica_credential_env(prefix, environment)
+    if all(masked_env_status(name) != "missing" for name in candidate.private_readonly_names):
+        return candidate
+    return None
+
+
+def pacifica_private_readonly_missing(prefix: str, environment: str = "TESTNET") -> list[str]:
+    names = pacifica_credential_env(prefix, environment).private_readonly_names
+    return [name for name in names if masked_env_status(name) == "missing"]
+
+
+def pacifica_signing_missing(prefix: str, environment: str = "TESTNET") -> list[str]:
+    names = pacifica_credential_env(prefix, environment)
+    return [name for name in names.signing_names if masked_env_status(name) == "missing"]
+
+
+def read_pacifica_private_readonly_params(prefix: str, environment: str = "TESTNET") -> dict[str, str]:
+    names = pacifica_available_private_readonly_env(prefix, environment) or pacifica_credential_env(prefix, environment)
+    return {"account": get_env(names.account_address)}
+
+
+def read_pacifica_credentials(prefix: str, environment: str = "TESTNET") -> dict[str, str]:
+    names = pacifica_credential_env(prefix, environment)
+    return {
+        "account_address": get_env(names.account_address),
+        "api_agent_public_key": get_env(names.api_agent_public_key),
+        "api_agent_private_key": get_env(names.api_agent_private_key),
+    }
+
+
+def _pacifica_credential_environment(environment: str) -> str:
     normalized = normalize_env_prefix(environment)
     if normalized in {"MAINNET", "PROD", "PRODUCTION"}:
         return "PRODUCTION"

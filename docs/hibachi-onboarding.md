@@ -223,6 +223,7 @@ Allowed now:
 - `get_prices`
 - `get_stats`
 - `get_orderbook`
+- `get_inventory`
 - `get_account_info`
 - `get_capital_balance`
 
@@ -235,6 +236,60 @@ Still forbidden until explicit approval:
 - `batch_orders`
 - `withdraw`
 - `transfer`
+
+## Hibachi Fee Provider
+
+The Hibachi weekly live/dry-run runner has a dedicated fee provider. It does not
+submit orders. It only reads fee values and passes them into the shared
+`execution_cost.py` core as bps.
+
+Fee source priority:
+
+```text
+1. account API: get_account_info tradeMakerFeeRate/tradeTakerFeeRate
+2. metadata API: get_inventory feeConfig tradeMakerFeeRate/tradeTakerFeeRate
+3. exact market config override: entry_fee_bps / exit_fee_bps
+4. market config multiplier: fee_multiplier with fee_multiplier_expires_at
+5. fee_unknown: block the candidate
+```
+
+For market-order entry and close flows, Hibachi uses taker fee for both entry
+and exit. A fee rate like `0.00045` is converted to `4.5 bps` by multiplying by
+`10000`.
+
+Optional market config fields:
+
+```json
+{
+  "entry_fee_bps": 4.5,
+  "exit_fee_bps": 4.5,
+  "fee_multiplier": 0.5,
+  "fee_multiplier_expires_at": "2026-07-14T00:00:00+00:00",
+  "slippage_buffer_bps": 0.5
+}
+```
+
+Account/metadata fees are queried first for safety logging. If a complete exact
+override is configured for a market, that checked value replaces the computed fee
+and wins over `fee_multiplier`. `fee_multiplier != 1` requires
+`fee_multiplier_expires_at`; missing or expired expiry makes the bot ignore the
+multiplier and report a source reason such as
+`account_taker_fee_config_multiplier_missing_expiry_ignored` or
+`account_taker_fee_config_multiplier_expired_ignored`.
+
+Market selection uses:
+
+```text
+expected_loss_bps =
+  live_spread_bps
+  + entry_fee_bps
+  + exit_fee_bps
+  + slippage_buffer_bps
+```
+
+Eligible markets are selected by lowest `expected_loss_bps` first, then by live
+spread. If fee is unknown, the candidate is rejected with `fee_unknown`; the code
+never treats unknown fee as zero.
 
 Weekly budget behavior:
 

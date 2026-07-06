@@ -1,0 +1,17 @@
+{
+  "environment": "production",
+  "target_gross_volume_usd": "22",
+  "order_notional_usd": "11",
+  "level_size_fraction": "0.5",
+  "threshold_source": "current",
+  "markets": [
+    {
+      "symbol": "BTC",
+      "display_market": "BTC-PERP",
+      "current_spread_bps": "1",
+      "spread_5m_bps": "1",
+      "spread_1h_bps": "1",
+      "spread_24h_bps": "1"
+    }
+  ]
+}

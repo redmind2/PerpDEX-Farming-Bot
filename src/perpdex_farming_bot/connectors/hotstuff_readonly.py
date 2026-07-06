@@ -32,6 +32,7 @@ PRIVATE_READONLY_INFO_METHODS = {
     "instrumentLeverage",
     "allAgents",
     "referralSummary",
+    "user_fees",
     "userFees",
 }
 

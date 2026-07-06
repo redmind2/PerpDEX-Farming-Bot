@@ -9,6 +9,66 @@ from perpdex_farming_bot.analytics import PerformanceMetrics
 from perpdex_farming_bot.budget import BudgetState, PeriodWindow
 
 
+LIVE_RUN_EVENT_COLUMNS = (
+    "exchange",
+    "account_label",
+    "wallet_label",
+    "market",
+    "cycle_id",
+    "environment",
+    "fee_level",
+    "maker_fee_bps",
+    "taker_fee_bps",
+    "entry_fee_bps",
+    "exit_fee_bps",
+    "fee_source",
+    "fee_multiplier",
+    "fee_multiplier_expires_at",
+    "live_spread_bps",
+    "expected_loss_bps",
+    "planned_gross_volume_usd",
+    "filled_gross_volume_usd",
+    "estimated_fee_usd",
+    "estimated_loss_usd",
+    "realized_pnl_usd",
+    "points_estimate",
+    "start_position_count",
+    "final_position_count",
+    "start_open_order_count",
+    "final_open_order_count",
+    "order_ids",
+    "error_reason",
+    "status",
+)
+
+
+_LIVE_RUN_EXTRA_COLUMNS = {
+    "environment": "TEXT",
+    "cycle_id": "TEXT",
+    "fee_level": "TEXT",
+    "maker_fee_bps": "REAL",
+    "taker_fee_bps": "REAL",
+    "entry_fee_bps": "REAL",
+    "exit_fee_bps": "REAL",
+    "fee_source": "TEXT",
+    "fee_multiplier": "REAL",
+    "fee_multiplier_expires_at": "TEXT",
+    "live_spread_bps": "REAL",
+    "expected_loss_bps": "REAL",
+    "filled_gross_volume_usd": "REAL",
+    "estimated_fee_usd": "REAL",
+    "estimated_loss_usd": "REAL",
+    "realized_pnl_usd": "REAL",
+    "points_estimate": "REAL",
+    "start_position_count": "INTEGER",
+    "final_position_count": "INTEGER",
+    "start_open_order_count": "INTEGER",
+    "final_open_order_count": "INTEGER",
+    "order_ids": "TEXT",
+    "error_reason": "TEXT",
+}
+
+
 @dataclass(frozen=True)
 class WeeklyTotals:
     gross_volume_usd: float
@@ -136,10 +196,34 @@ class WeeklyLedger:
                     planned_gross_volume_usd REAL NOT NULL,
                     first_side TEXT NOT NULL,
                     second_side TEXT NOT NULL,
+                    environment TEXT,
+                    cycle_id TEXT,
+                    fee_level TEXT,
+                    maker_fee_bps REAL,
+                    taker_fee_bps REAL,
+                    entry_fee_bps REAL,
+                    exit_fee_bps REAL,
+                    fee_source TEXT,
+                    fee_multiplier REAL,
+                    fee_multiplier_expires_at TEXT,
+                    live_spread_bps REAL,
+                    expected_loss_bps REAL,
+                    filled_gross_volume_usd REAL,
+                    estimated_fee_usd REAL,
+                    estimated_loss_usd REAL,
+                    realized_pnl_usd REAL,
+                    points_estimate REAL,
+                    start_position_count INTEGER,
+                    final_position_count INTEGER,
+                    start_open_order_count INTEGER,
+                    final_open_order_count INTEGER,
+                    order_ids TEXT,
+                    error_reason TEXT,
                     status TEXT NOT NULL
                 );
                 """
             )
+            self._ensure_live_run_extra_columns(connection)
 
     def load_budget_state(
         self,
@@ -336,10 +420,35 @@ class WeeklyLedger:
         first_side: str,
         second_side: str,
         status: str,
+        environment: str = "production",
+        cycle_id: str | None = None,
+        fee_level: str | None = None,
+        maker_fee_bps: float | None = None,
+        taker_fee_bps: float | None = None,
+        entry_fee_bps: float | None = None,
+        exit_fee_bps: float | None = None,
+        fee_source: str | None = None,
+        fee_multiplier: float | None = None,
+        fee_multiplier_expires_at: str | None = None,
+        live_spread_bps: float | None = None,
+        expected_loss_bps: float | None = None,
+        filled_gross_volume_usd: float | None = None,
+        estimated_fee_usd: float | None = None,
+        estimated_loss_usd: float | None = None,
+        realized_pnl_usd: float | None = None,
+        points_estimate: float | None = None,
+        start_position_count: int | None = None,
+        final_position_count: int | None = None,
+        start_open_order_count: int | None = None,
+        final_open_order_count: int | None = None,
+        order_ids: str | None = None,
+        error_reason: str | None = None,
     ) -> None:
         now_text = _format_ts(timestamp)
         period_start = _format_ts(period.start_utc)
         period_end = _format_ts(period.end_utc)
+        event_cycle_id = cycle_id or f"{phase}:{cycle}"
+        event_live_spread_bps = live_spread_bps if live_spread_bps is not None else spread_bps
 
         with self._connect() as connection:
             connection.execute(
@@ -363,8 +472,31 @@ class WeeklyLedger:
                     planned_gross_volume_usd,
                     first_side,
                     second_side,
+                    environment,
+                    cycle_id,
+                    fee_level,
+                    maker_fee_bps,
+                    taker_fee_bps,
+                    entry_fee_bps,
+                    exit_fee_bps,
+                    fee_source,
+                    fee_multiplier,
+                    fee_multiplier_expires_at,
+                    live_spread_bps,
+                    expected_loss_bps,
+                    filled_gross_volume_usd,
+                    estimated_fee_usd,
+                    estimated_loss_usd,
+                    realized_pnl_usd,
+                    points_estimate,
+                    start_position_count,
+                    final_position_count,
+                    start_open_order_count,
+                    final_open_order_count,
+                    order_ids,
+                    error_reason,
                     status
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     now_text,
@@ -385,6 +517,29 @@ class WeeklyLedger:
                     planned_gross_volume_usd,
                     first_side,
                     second_side,
+                    environment,
+                    event_cycle_id,
+                    fee_level,
+                    maker_fee_bps,
+                    taker_fee_bps,
+                    entry_fee_bps,
+                    exit_fee_bps,
+                    fee_source,
+                    fee_multiplier,
+                    fee_multiplier_expires_at,
+                    event_live_spread_bps,
+                    expected_loss_bps,
+                    filled_gross_volume_usd,
+                    estimated_fee_usd,
+                    estimated_loss_usd,
+                    realized_pnl_usd,
+                    points_estimate,
+                    start_position_count,
+                    final_position_count,
+                    start_open_order_count,
+                    final_open_order_count,
+                    order_ids,
+                    error_reason,
                     status,
                 ),
             )
@@ -503,6 +658,15 @@ class WeeklyLedger:
         connection = sqlite3.connect(self.path)
         connection.row_factory = sqlite3.Row
         return connection
+
+    def _ensure_live_run_extra_columns(self, connection: sqlite3.Connection) -> None:
+        existing = {
+            str(row["name"])
+            for row in connection.execute("PRAGMA table_info(live_runs)").fetchall()
+        }
+        for name, column_type in _LIVE_RUN_EXTRA_COLUMNS.items():
+            if name not in existing:
+                connection.execute(f"ALTER TABLE live_runs ADD COLUMN {name} {column_type}")
 
     def _live_where(
         self,

@@ -17,6 +17,9 @@ from perpdex_farming_bot.exchanges.base import (
 )
 
 
+_HOTSTUFF_SDK_COMPAT_READY = False
+
+
 @dataclass(frozen=True)
 class HotstuffAdapter:
     api_endpoint: str
@@ -89,6 +92,7 @@ class HotstuffAdapter:
         first_side: str = "BUY",
         second_side: str = "SELL",
     ) -> PairedRoundtripResult:
+        ensure_hotstuff_sdk_compat()
         from hotstuff import PlaceOrderParams, UnitOrder
 
         del first_side, second_side
@@ -138,6 +142,7 @@ class HotstuffAdapter:
         price: Decimal,
         size: Decimal,
     ) -> ExchangeOrderResult:
+        ensure_hotstuff_sdk_compat()
         from hotstuff import PlaceOrderParams, UnitOrder
 
         if side not in {"b", "s"}:
@@ -157,7 +162,12 @@ class HotstuffAdapter:
         response = _safe_place_order(client, PlaceOrderParams(orders=[order], expiresAfter=_now_ms() + 60_000))
         return _order_result_from_response(self.exchange_id, market, response)
 
+    def submit_place_order_params(self, *, market: str, params: object) -> ExchangeOrderResult:
+        response = _safe_place_order(self._exchange_client(), params)
+        return _order_result_from_response(self.exchange_id, market, response)
+
     def _exchange_client(self) -> object:
+        ensure_hotstuff_sdk_compat()
         from eth_account import Account
         from hotstuff import ExchangeClient
 
@@ -178,6 +188,44 @@ class HotstuffAdapter:
         except Exception:
             return False
         return _payload_contains_address(payload, signer_address.casefold())
+
+
+def ensure_hotstuff_sdk_compat() -> None:
+    global _HOTSTUFF_SDK_COMPAT_READY
+
+    import eth_account.messages as messages
+
+    if not hasattr(messages, "encode_structured_data") and hasattr(messages, "encode_typed_data"):
+        def encode_structured_data(primitive: dict[str, object] | None = None, **kwargs: object) -> object:
+            full_message = primitive if primitive is not None else kwargs.get("full_message")
+            return messages.encode_typed_data(full_message=full_message)  # type: ignore[attr-defined]
+
+        messages.encode_structured_data = encode_structured_data  # type: ignore[attr-defined]
+
+    if _HOTSTUFF_SDK_COMPAT_READY:
+        return
+
+    try:
+        import hotstuff.apis.exchange as exchange_api
+        import hotstuff.utils.signing as signing
+    except ImportError:
+        return
+
+    original = signing.sign_action
+    if getattr(original, "_perpdex_compat", False):
+        _HOTSTUFF_SDK_COMPAT_READY = True
+        return
+
+    def sign_action_with_0x(*args: object, **kwargs: object) -> str:
+        signature = original(*args, **kwargs)
+        if isinstance(signature, str) and len(signature) == 130 and not signature.startswith("0x"):
+            return "0x" + signature
+        return signature
+
+    sign_action_with_0x._perpdex_compat = True  # type: ignore[attr-defined]
+    signing.sign_action = sign_action_with_0x  # type: ignore[assignment]
+    exchange_api.sign_action = sign_action_with_0x  # type: ignore[assignment]
+    _HOTSTUFF_SDK_COMPAT_READY = True
 
 
 def hotstuff_close_price(

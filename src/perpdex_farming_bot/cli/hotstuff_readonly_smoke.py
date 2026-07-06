@@ -36,7 +36,7 @@ PRIVATE_METHOD_ALIASES = {
     "instrument-leverage": "instrumentLeverage",
     "all-agents": "allAgents",
     "referral-summary": "referralSummary",
-    "user-fees": "userFees",
+    "user-fees": "user_fees",
 }
 
 

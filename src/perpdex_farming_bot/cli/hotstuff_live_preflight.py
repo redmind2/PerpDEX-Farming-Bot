@@ -16,8 +16,22 @@ from perpdex_farming_bot.connectors.hotstuff_readonly import (
     normalize_hotstuff_environment,
     validate_https_base_url,
 )
+from perpdex_farming_bot.core.execution_cost import MarketCostInput, MarketCostResult, calculate_market_cost
+from perpdex_farming_bot.core.execution_event import (
+    ExecutionEvent,
+    emit_execution_event,
+    estimate_loss_usd,
+    estimate_roundtrip_fee_usd,
+)
 from perpdex_farming_bot.credentials import hotstuff_available_private_readonly_env, read_hotstuff_private_readonly_params
 from perpdex_farming_bot.env import get_env, load_dotenv_if_present
+from perpdex_farming_bot.exchanges.hotstuff_fees import (
+    HotstuffAccountFee,
+    HotstuffFeeProvider,
+    hotstuff_fee_overrides_from_plan,
+    hotstuff_market_fee_metadata_from_instruments,
+    load_hotstuff_account_fee,
+)
 
 
 @dataclass(frozen=True)
@@ -84,6 +98,8 @@ def main() -> None:
         "min(order_notional_usd, remaining_gross_volume_usd/2, smaller_best_bid_or_ask_level_notional*level_size_fraction)"
     )
     print(f"min_entry_delay_seconds={delay_seconds}")
+    print("market_selection=lowest_expected_loss_bps_then_live_spread_bps")
+    print("fee_unknown_policy=block")
 
     account_env = hotstuff_available_private_readonly_env(args.credential_prefix, environment)
     print(f"private_readonly_env_ready={account_env is not None}")
@@ -94,6 +110,15 @@ def main() -> None:
 
     instruments = _load_instrument_map(api_endpoint, args.timeout_seconds)
     print(f"instrument_count={len(instruments)}")
+    fee_provider = _load_hotstuff_fee_provider(
+        api_endpoint=api_endpoint,
+        credential_prefix=args.credential_prefix,
+        environment=environment,
+        plan=plan,
+        instruments=instruments,
+        timeout_seconds=args.timeout_seconds,
+        private_readonly_ready=account_env is not None,
+    )
 
     candidates: list[MarketCandidate] = []
     for market in plan["markets"]:
@@ -101,8 +126,15 @@ def main() -> None:
             _candidate_from_live_orderbook(api_endpoint, market, instruments, max_spread_bps, args.timeout_seconds)
         )
 
-    eligible = [candidate for candidate in candidates if candidate.eligible]
+    eligible: list[tuple[MarketCandidate, MarketCostResult]] = []
     for candidate in candidates:
+        cost = _candidate_cost(candidate, fee_provider) if candidate.eligible else None
+        cost_eligible = cost.eligible if cost is not None else False
+        expected_loss = f"{cost.expected_loss_bps:.4f}" if cost is not None else "999999.0000"
+        fee_source = cost.fee_source if cost is not None else "not_checked"
+        reason = candidate.reason if not candidate.eligible else (cost.reason if cost is not None and not cost.eligible else candidate.reason)
+        if cost is not None and cost_eligible:
+            eligible.append((candidate, cost))
         print(f"market={candidate.market}")
         print(f"  instrument_id={candidate.instrument_id}")
         print(f"  lot_size={candidate.lot_size}")
@@ -115,8 +147,13 @@ def main() -> None:
         print(f"  live_best_bid_size={candidate.best_bid_size}")
         print(f"  live_best_ask_size={candidate.best_ask_size}")
         print(f"  live_spread_bps={candidate.live_spread_bps:.4f}")
-        print(f"  eligible={candidate.eligible}")
-        print(f"  reason={candidate.reason}")
+        print(f"  entry_fee_bps={cost.entry_fee_bps if cost is not None else 0}")
+        print(f"  exit_fee_bps={cost.exit_fee_bps if cost is not None else 0}")
+        print(f"  slippage_buffer_bps={cost.slippage_buffer_bps if cost is not None else 0}")
+        print(f"  fee_source={fee_source}")
+        print(f"  expected_loss_bps={expected_loss}")
+        print(f"  eligible={candidate.eligible and cost_eligible}")
+        print(f"  reason={reason}")
 
     print(f"eligible_market_count={len(eligible)}")
     if not eligible:
@@ -124,7 +161,10 @@ def main() -> None:
         print("preflight_ready=False")
         return
 
-    selected = sorted(eligible, key=lambda item: (item.live_spread_bps, item.provided_current_spread_bps, item.market))[0]
+    selected, selected_cost = min(
+        eligible,
+        key=lambda item: (item[1].expected_loss_bps, item[0].live_spread_bps, item[0].market),
+    )
     order_plan = _roundtrip_order_plan(
         selected,
         order_notional,
@@ -141,6 +181,11 @@ def main() -> None:
     print(f"selected_tick_size={selected.tick_size}")
     print(f"selected_min_notional_usd={selected.min_notional_usd}")
     print(f"selected_live_spread_bps={selected.live_spread_bps:.4f}")
+    print(f"selected_entry_fee_bps={selected_cost.entry_fee_bps}")
+    print(f"selected_exit_fee_bps={selected_cost.exit_fee_bps}")
+    print(f"selected_slippage_buffer_bps={selected_cost.slippage_buffer_bps}")
+    print(f"selected_fee_source={selected_cost.fee_source}")
+    print(f"selected_expected_loss_bps={selected_cost.expected_loss_bps:.4f}")
     print(f"selected_24h_threshold_bps={selected.provided_24h_spread_bps}")
     print(f"selected_best_bid={selected.best_bid}")
     print(f"selected_best_ask={selected.best_ask}")
@@ -154,6 +199,17 @@ def main() -> None:
     print(f"planned_target_gross_volume_usd={target_gross_volume}")
     print(f"planned_one_way_order_count_to_target={one_way_cycles}")
     print(f"planned_roundtrip_cycles_to_target_if_buy_sell={roundtrip_cycles}")
+    _emit_hotstuff_execution_event(
+        account_label=args.credential_prefix,
+        environment=environment,
+        market=selected.market,
+        fee_provider=fee_provider,
+        cost=selected_cost,
+        entry_notional_usd=order_plan["buy_qty"] * selected.best_ask,
+        exit_notional_usd=order_plan["sell_qty"] * selected.best_bid,
+        planned_gross_volume_usd=planned_gross,
+        status="preflight_ready",
+    )
     print("live_execution_ready=requires_hotstuff_live_test_confirmation")
     print("preflight_ready=True")
 
@@ -287,6 +343,140 @@ def _round_down_to_step(value: Decimal, step: Decimal) -> Decimal:
     if step <= 0:
         return value
     return (value / step).to_integral_value(rounding=ROUND_DOWN) * step
+
+
+def _load_hotstuff_fee_provider(
+    *,
+    api_endpoint: str,
+    credential_prefix: str,
+    environment: str,
+    plan: dict[str, object],
+    instruments: dict[str, dict[str, object]],
+    timeout_seconds: float,
+    private_readonly_ready: bool,
+) -> HotstuffFeeProvider:
+    overrides = hotstuff_fee_overrides_from_plan(plan)
+    metadata = hotstuff_market_fee_metadata_from_instruments(instruments)
+    account_fee = _load_account_fee_or_none(
+        api_endpoint=api_endpoint,
+        credential_prefix=credential_prefix,
+        environment=environment,
+        timeout_seconds=timeout_seconds,
+        private_readonly_ready=private_readonly_ready,
+    )
+    complete_overrides = [
+        item
+        for item in overrides.values()
+        if item.entry_fee_bps is not None and item.exit_fee_bps is not None
+    ]
+    multiplier_overrides = [item for item in overrides.values() if item.fee_multiplier != Decimal("1")]
+    print("fee_provider=hotstuff")
+    print(f"fee_market_metadata_count={len(metadata)}")
+    print(f"fee_config_exact_override_count={len(complete_overrides)}")
+    print(f"fee_config_multiplier_count={len(multiplier_overrides)}")
+    return HotstuffFeeProvider(
+        metadata_by_market=metadata,
+        override_by_market=overrides,
+        account_fee=account_fee,
+    )
+
+
+def _load_account_fee_or_none(
+    *,
+    api_endpoint: str,
+    credential_prefix: str,
+    environment: str,
+    timeout_seconds: float,
+    private_readonly_ready: bool,
+) -> HotstuffAccountFee | None:
+    if not private_readonly_ready:
+        print("account_fee_private_readonly_skipped=missing_account_address_env")
+        return None
+    try:
+        account_fee = load_hotstuff_account_fee(api_endpoint, credential_prefix, environment, timeout_seconds)
+    except Exception as exc:
+        print("account_fee_private_readonly_ok=False")
+        print(f"account_fee_error_type={exc.__class__.__name__}")
+        return None
+
+    print("account_fee_private_readonly_ok=True")
+    print(f"account_fee_level={account_fee.fee_level or 'unknown'}")
+    print(f"account_maker_fee_bps={account_fee.maker_fee_bps}")
+    print(f"account_taker_fee_bps={account_fee.taker_fee_bps}")
+    return account_fee
+
+
+def _candidate_cost(candidate: MarketCandidate, fee_provider: HotstuffFeeProvider) -> MarketCostResult:
+    return calculate_market_cost(
+        MarketCostInput(
+            exchange_id="hotstuff",
+            market=candidate.market,
+            live_spread_bps=candidate.live_spread_bps,
+            fee=fee_provider.fee_for_market(candidate.market),
+        )
+    )
+
+
+def _emit_hotstuff_execution_event(
+    *,
+    account_label: str,
+    environment: str,
+    market: str,
+    fee_provider: HotstuffFeeProvider,
+    cost: MarketCostResult,
+    entry_notional_usd: Decimal,
+    exit_notional_usd: Decimal,
+    planned_gross_volume_usd: Decimal,
+    status: str,
+) -> None:
+    account_fee = fee_provider.account_fee
+    override = fee_provider.override_by_market.get(market)
+    estimated_fee = estimate_roundtrip_fee_usd(
+        entry_notional_usd=entry_notional_usd,
+        exit_notional_usd=exit_notional_usd,
+        entry_fee_bps=cost.entry_fee_bps if cost.fee_known else None,
+        exit_fee_bps=cost.exit_fee_bps if cost.fee_known else None,
+    )
+    emit_execution_event(
+        ExecutionEvent(
+            exchange="hotstuff",
+            account_label=account_label,
+            wallet_label=None,
+            market=market,
+            cycle_id="preflight",
+            environment=environment,
+            fee_level=account_fee.fee_level if account_fee is not None else None,
+            maker_fee_bps=account_fee.maker_fee_bps if account_fee is not None else None,
+            taker_fee_bps=account_fee.taker_fee_bps if account_fee is not None else None,
+            entry_fee_bps=cost.entry_fee_bps if cost.fee_known else None,
+            exit_fee_bps=cost.exit_fee_bps if cost.fee_known else None,
+            fee_source=cost.fee_source,
+            fee_multiplier=override.fee_multiplier if override is not None else Decimal("1"),
+            fee_multiplier_expires_at=(
+                override.fee_multiplier_expires_at.isoformat()
+                if override is not None and override.fee_multiplier_expires_at is not None
+                else None
+            ),
+            live_spread_bps=cost.live_spread_bps,
+            expected_loss_bps=cost.expected_loss_bps if cost.fee_known else None,
+            planned_gross_volume_usd=planned_gross_volume_usd,
+            filled_gross_volume_usd=None,
+            estimated_fee_usd=estimated_fee,
+            estimated_loss_usd=estimate_loss_usd(
+                planned_gross_volume_usd=planned_gross_volume_usd,
+                expected_loss_bps=cost.expected_loss_bps if cost.fee_known else None,
+            ),
+            realized_pnl_usd=None,
+            points_estimate=None,
+            start_position_count=None,
+            final_position_count=None,
+            start_open_order_count=None,
+            final_open_order_count=None,
+            order_ids=(),
+            error_reason=None,
+            status=status,
+        )
+    )
 
 
 def _print_account_summary_status(

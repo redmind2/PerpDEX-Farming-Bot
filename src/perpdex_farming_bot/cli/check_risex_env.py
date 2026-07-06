@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 
 from perpdex_farming_bot.connectors.risex_readonly import (
     RisexReadonlyConfigError,
@@ -75,6 +76,14 @@ def main() -> None:
     print(f"primary_{credential_env.account_address}={masked_env_status(credential_env.account_address)}")
     print(f"primary_{credential_env.signer_address}={masked_env_status(credential_env.signer_address)}")
     print(f"primary_{credential_env.signer_private_key}={masked_env_status(credential_env.signer_private_key)}")
+    print(f"eth_account_installed={importlib.util.find_spec('eth_account') is not None}")
+
+    key_parse_status, key_matches_signer = _check_signer_private_key(
+        signer_address=get_env(credential_env.signer_address),
+        signer_private_key=get_env(credential_env.signer_private_key),
+    )
+    print(f"signer_private_key_parse={key_parse_status}")
+    print(f"signer_address_matches_private_key={key_matches_signer}")
 
     private_missing = risex_private_readonly_missing(args.credential_prefix, environment)
     signing_missing = risex_signing_missing(args.credential_prefix, environment)
@@ -89,6 +98,21 @@ def main() -> None:
     print(f"risex_env_ready={not endpoint_errors and available_env is not None}")
     if endpoint_errors:
         print("invalid_endpoints=" + ",".join(endpoint_errors))
+
+
+def _check_signer_private_key(*, signer_address: str, signer_private_key: str) -> tuple[str, str]:
+    if not signer_private_key:
+        return "skipped_missing", "skipped"
+    try:
+        from eth_account import Account
+
+        derived = Account.from_key(signer_private_key).address
+    except Exception:
+        return "error", "skipped"
+
+    if not signer_address:
+        return "ok", "skipped_missing_signer_address"
+    return "ok", str(derived.casefold() == signer_address.casefold())
 
 
 if __name__ == "__main__":

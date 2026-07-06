@@ -1,0 +1,28 @@
+{
+  "markets": [
+    {
+      "market_id": 1,
+      "display_market": "BTC-PERP",
+      "fee_multiplier": "1",
+      "slippage_buffer_bps": "0"
+    },
+    {
+      "market_id": 2,
+      "display_market": "ETH-PERP",
+      "fee_multiplier": "1",
+      "slippage_buffer_bps": "0"
+    },
+    {
+      "market_id": 4,
+      "display_market": "SOL-PERP",
+      "fee_multiplier": "1",
+      "slippage_buffer_bps": "0"
+    },
+    {
+      "market_id": 5,
+      "display_market": "HYPE-PERP",
+      "fee_multiplier": "1",
+      "slippage_buffer_bps": "0"
+    }
+  ]
+}

@@ -11,7 +11,19 @@ from pathlib import Path
 from typing import Any, Literal
 
 from perpdex_farming_bot.budget import current_weekly_window
+from perpdex_farming_bot.cli.hibachi_live_common import (
+    HibachiAccountFee,
+    HibachiFeeOverride,
+    HibachiFeeProvider,
+    load_hibachi_account_fee,
+    load_hibachi_metadata_fee,
+)
 from perpdex_farming_bot.cli.hibachi_live_roundtrip import (
+    _elapsed_ms,
+    _execute_fast_close_market_roundtrip,
+    _now_ns,
+    _open_order_count,
+    _opposite_side,
     _paired_market_sides,
     _position_state,
 )
@@ -21,7 +33,7 @@ from perpdex_farming_bot.connectors.hibachi_readonly import (
     endpoint_from_env,
 )
 from perpdex_farming_bot.connectors.hibachi_sdk_public import load_hibachi_orderbook_snapshot
-from perpdex_farming_bot.core import RoundtripPlan, execute_roundtrip_plan
+from perpdex_farming_bot.core import MarketCostInput, MarketCostResult, RoundtripPlan, calculate_market_cost, execute_roundtrip_plan
 from perpdex_farming_bot.credentials import (
     hibachi_available_credential_env,
     hibachi_missing_required,
@@ -32,7 +44,7 @@ from perpdex_farming_bot.marketdata import MarketSpec, RestBackoff, SpreadCache
 from perpdex_farming_bot.marketdata.hibachi import refresh_hibachi_spread_cache
 from perpdex_farming_bot.exchanges.hibachi import HibachiAdapter
 from perpdex_farming_bot.security.secrets import assert_no_plaintext_secrets
-from perpdex_farming_bot.storage import WeeklyLedger
+from perpdex_farming_bot.storage import LIVE_RUN_EVENT_COLUMNS, WeeklyLedger
 
 
 CONFIRM_TEXT = "LIVE_HIBACHI_WEEKLY_TEST"
@@ -67,6 +79,11 @@ class MarketRun:
     orderbook_granularity: float
     market_order_safety_max_notional_usd: Decimal | None = None
     market_order_liquidity_safety_fraction: Decimal | None = None
+    entry_fee_bps: Decimal | None = None
+    exit_fee_bps: Decimal | None = None
+    fee_multiplier: Decimal = Decimal("1")
+    fee_multiplier_expires_at: datetime | None = None
+    slippage_buffer_bps: Decimal = Decimal("0")
 
 
 @dataclass(frozen=True)
@@ -85,6 +102,7 @@ class MarketCandidate:
     snapshot: object
     plan: "RoundPlan"
     spread_ratio: Decimal
+    cost: MarketCostResult
 
 
 def main() -> None:
@@ -113,6 +131,30 @@ def main() -> None:
     )
     parser.add_argument("--max-fees-percent", type=Decimal, default=Decimal("0.0005"))
     parser.add_argument("--min-entry-delay-seconds", type=float, default=1.0)
+    parser.add_argument(
+        "--loop-delay-seconds",
+        type=float,
+        default=None,
+        help=(
+            "Delay before the next live cycle. If omitted, the legacy --min-entry-delay-seconds value is used."
+        ),
+    )
+    parser.add_argument(
+        "--fast-close-on-fill",
+        action="store_true",
+        help=(
+            "After a successful entry market POST, submit the reduce-only close immediately "
+            "without waiting for a position REST check between orders."
+        ),
+    )
+    parser.add_argument(
+        "--prebuild-close-order",
+        action="store_true",
+        help=(
+            "Request close-order prebuild before entry. Hibachi SDK market orders sign inside POST, "
+            "so this currently logs unsupported and uses SDK-internal signing."
+        ),
+    )
     parser.add_argument("--monitor-source", choices=("auto", "websocket", "rest"), default="auto")
     parser.add_argument("--monitor-cache-max-age-seconds", type=float, default=2.0)
     parser.add_argument("--websocket-snapshot-timeout-seconds", type=float, default=0.8)
@@ -202,6 +244,11 @@ def main() -> None:
     print("volume_counter_source=pre_trade_best_ask_notional")
     print("volume_counter_counts=both_market_sides")
     print(f"min_entry_delay_seconds={args.min_entry_delay_seconds:.2f}")
+    print(f"loop_delay_seconds={_loop_delay_seconds(args):.2f}")
+    print(f"fast_close_on_fill={args.fast_close_on_fill}")
+    print(f"prebuild_close_order={args.prebuild_close_order}")
+    print("hibachi_close_prebuild_supported=False")
+    print("hibachi_signing_mode=sdk_internal_at_post")
     print(f"max_order_notional_usd={sizing.max_order_notional_usd}")
     print(f"market_order_safety_max_notional_usd={sizing.market_order_safety_max_notional_usd}")
     print(f"level_size_fraction={sizing.level_size_fraction}")
@@ -213,6 +260,7 @@ def main() -> None:
     print(f"websocket_snapshot_timeout_seconds={args.websocket_snapshot_timeout_seconds}")
     print("fresh_orderbook_verify=selected_market_only_before_order")
     print(f"continue_after_residual_close={args.continue_after_residual_close}")
+    print("operation_event_fields=" + ",".join(LIVE_RUN_EVENT_COLUMNS))
 
     if not runs:
         raise SystemExit("no enabled Hibachi weekly test markets found")
@@ -235,7 +283,12 @@ def main() -> None:
             f"credential_prefix={run.wallet.credential_prefix} credential_status={credential_status} "
             f"resume_completed={run.phase_label in completed_phases} "
             f"market_order_safety_max_notional_usd={_effective_safety_max_notional(sizing, run)} "
-            f"market_order_liquidity_safety_fraction={_effective_liquidity_safety_fraction(sizing, run)}"
+            f"market_order_liquidity_safety_fraction={_effective_liquidity_safety_fraction(sizing, run)} "
+            f"entry_fee_bps={run.entry_fee_bps if run.entry_fee_bps is not None else 'auto'} "
+            f"exit_fee_bps={run.exit_fee_bps if run.exit_fee_bps is not None else 'auto'} "
+            f"fee_multiplier={run.fee_multiplier} "
+            f"fee_multiplier_expires_at={run.fee_multiplier_expires_at.isoformat() if run.fee_multiplier_expires_at else 'none'} "
+            f"slippage_buffer_bps={run.slippage_buffer_bps}"
         )
         if missing:
             print(f"phase_blocked_missing_env={','.join(missing)}")
@@ -255,6 +308,24 @@ def main() -> None:
     for run in runs:
         clients.setdefault(run.wallet.credential_prefix, _hibachi_client(run.wallet.credential_prefix))
 
+    first_client = next(iter(clients.values()))
+    metadata_fee = _load_metadata_fee_or_none(first_client)
+    account_fee_by_prefix = {
+        prefix: _load_account_fee_or_none(client, prefix)
+        for prefix, client in clients.items()
+    }
+    fee_providers = {
+        prefix: _fee_provider_for_prefix(
+            credential_prefix=prefix,
+            runs=runs,
+            account_fee_by_prefix=account_fee_by_prefix,
+            metadata_fee=metadata_fee,
+        )
+        for prefix in clients
+    }
+    print("fee_source_priority=account_api_then_market_metadata_then_config_exact_override_then_config_multiplier_then_fee_unknown_block")
+    print("fee_order_type=market_taker_entry_and_exit")
+
     preflight_ok = True
     for run in runs:
         if run.phase_label in completed_phases:
@@ -265,6 +336,7 @@ def main() -> None:
                 sizing,
                 run,
                 clients[run.wallet.credential_prefix],
+                fee_providers[run.wallet.credential_prefix],
                 _phase_target_for_run(target_totals, run),
             )
         preflight_ok = preflight_ok and ok
@@ -294,8 +366,8 @@ def main() -> None:
             print(f"combined_live_planned_gross_volume_usd={combined_live_volume:.4f}")
             continue
         if active_phase_index > 1:
-            print(f"phase_transition_delay_seconds={args.min_entry_delay_seconds:.2f}")
-            time.sleep(args.min_entry_delay_seconds)
+            print(f"phase_transition_delay_seconds={_loop_delay_seconds(args):.2f}")
+            time.sleep(_loop_delay_seconds(args))
         phase_volume = _run_live_phase(
             args,
             sizing,
@@ -303,6 +375,7 @@ def main() -> None:
             phase_target,
             phase_markets,
             clients,
+            fee_providers,
             ledger,
             week,
         )
@@ -311,10 +384,12 @@ def main() -> None:
         print(f"combined_live_planned_gross_volume_usd={combined_live_volume:.4f}")
         if not _target_reached(phase_volume, phase_target):
             print(f"weekly_live_test_stopped=phase_target_not_reached:{phase_label}")
+            _print_weekly_final_state(runs, clients, combined_live_volume)
             return
 
     print("weekly_live_test_complete=True")
     print(f"combined_live_planned_gross_volume_usd={combined_live_volume:.4f}")
+    _print_weekly_final_state(runs, clients, combined_live_volume)
 
 
 def _validate_args(args: argparse.Namespace) -> None:
@@ -326,6 +401,10 @@ def _validate_args(args: argparse.Namespace) -> None:
         raise SystemExit("--max-fees-percent must be greater than zero")
     if args.min_entry_delay_seconds < 1:
         raise SystemExit("--min-entry-delay-seconds must be at least 1 for live safety")
+    if args.loop_delay_seconds is not None and args.loop_delay_seconds < 0:
+        raise SystemExit("--loop-delay-seconds must be zero or greater")
+    if args.prebuild_close_order and not args.fast_close_on_fill:
+        raise SystemExit("--prebuild-close-order requires --fast-close-on-fill")
     if args.max_cycles_per_phase <= 0:
         raise SystemExit("--max-cycles-per-phase must be greater than zero")
     if args.max_idle_cycles <= 0:
@@ -460,6 +539,27 @@ def _optional_fraction_decimal(value: object, label: str) -> Decimal | None:
     if decimal_value <= Decimal("0") or decimal_value > Decimal("1"):
         raise SystemExit(f"{label} must be greater than 0 and <= 1")
     return decimal_value
+
+
+def _optional_nonnegative_decimal(value: object, label: str) -> Decimal | None:
+    if value is None:
+        return None
+    decimal_value = Decimal(str(value))
+    if decimal_value < Decimal("0"):
+        raise SystemExit(f"{label} must be zero or greater")
+    return decimal_value
+
+
+def _optional_datetime(value: object) -> datetime | None:
+    if value is None or value == "":
+        return None
+    text = str(value).strip()
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    parsed = datetime.fromisoformat(text)
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed
 
 
 def _execution_sizing(plan: dict[str, Any]) -> ExecutionSizing:
@@ -616,6 +716,9 @@ def _market_run(
         raise SystemExit(f"fallback_average_spread_bps must be greater than zero for {phase_label}/{symbol}")
     if hard_cap <= Decimal("0"):
         raise SystemExit(f"max_allowed_spread_bps must be greater than zero for {phase_label}/{symbol}")
+    fee_multiplier = _decimal(market.get("fee_multiplier"), "1")
+    if fee_multiplier <= Decimal("0"):
+        raise SystemExit(f"fee_multiplier must be greater than zero for {phase_label}/{symbol}")
     return MarketRun(
         phase_key=phase_key,
         phase_label=phase_label,
@@ -633,6 +736,21 @@ def _market_run(
             market.get("market_order_liquidity_safety_fraction"),
             f"{phase_label}/{symbol}.market_order_liquidity_safety_fraction",
         ),
+        entry_fee_bps=_optional_nonnegative_decimal(
+            market.get("entry_fee_bps"),
+            f"{phase_label}/{symbol}.entry_fee_bps",
+        ),
+        exit_fee_bps=_optional_nonnegative_decimal(
+            market.get("exit_fee_bps"),
+            f"{phase_label}/{symbol}.exit_fee_bps",
+        ),
+        fee_multiplier=fee_multiplier,
+        fee_multiplier_expires_at=_optional_datetime(market.get("fee_multiplier_expires_at")),
+        slippage_buffer_bps=_optional_nonnegative_decimal(
+            market.get("slippage_buffer_bps"),
+            f"{phase_label}/{symbol}.slippage_buffer_bps",
+        )
+        or Decimal("0"),
     )
 
 
@@ -657,11 +775,66 @@ def _hibachi_client(credential_prefix: str) -> object:
     )
 
 
+def _load_account_fee_or_none(client: object, credential_prefix: str) -> HibachiAccountFee | None:
+    try:
+        fee = load_hibachi_account_fee(client)
+    except Exception as exc:
+        print(f"fee_account_lookup_error prefix={credential_prefix} error={exc.__class__.__name__}")
+        return None
+    print(f"fee_account_source prefix={credential_prefix} source={fee.source}")
+    print(f"fee_account_level prefix={credential_prefix} value={fee.fee_level or 'unknown'}")
+    print(f"fee_account_maker_fee_bps prefix={credential_prefix} value={fee.maker_fee_bps}")
+    print(f"fee_account_taker_fee_bps prefix={credential_prefix} value={fee.taker_fee_bps}")
+    return fee
+
+
+def _load_metadata_fee_or_none(client: object) -> HibachiAccountFee | None:
+    try:
+        fee = load_hibachi_metadata_fee(client)
+    except Exception as exc:
+        print(f"fee_metadata_lookup_error={exc.__class__.__name__}")
+        return None
+    print(f"fee_metadata_source={fee.source}")
+    print(f"fee_metadata_level={fee.fee_level or 'unknown'}")
+    print(f"fee_metadata_maker_fee_bps={fee.maker_fee_bps}")
+    print(f"fee_metadata_taker_fee_bps={fee.taker_fee_bps}")
+    return fee
+
+
+def _fee_provider_for_prefix(
+    *,
+    credential_prefix: str,
+    runs: list[MarketRun],
+    account_fee_by_prefix: dict[str, HibachiAccountFee | None],
+    metadata_fee: HibachiAccountFee | None,
+) -> HibachiFeeProvider:
+    return HibachiFeeProvider(
+        override_by_market=_fee_overrides_by_market(runs),
+        account_fee=account_fee_by_prefix.get(credential_prefix),
+        metadata_fee=metadata_fee,
+    )
+
+
+def _fee_overrides_by_market(runs: list[MarketRun]) -> dict[str, HibachiFeeOverride]:
+    return {
+        run.market: HibachiFeeOverride(
+            market=run.market,
+            entry_fee_bps=run.entry_fee_bps,
+            exit_fee_bps=run.exit_fee_bps,
+            fee_multiplier=run.fee_multiplier,
+            fee_multiplier_expires_at=run.fee_multiplier_expires_at,
+            slippage_buffer_bps=run.slippage_buffer_bps,
+        )
+        for run in runs
+    }
+
+
 def _print_phase_preflight(
     args: argparse.Namespace,
     sizing: ExecutionSizing,
     run: MarketRun,
     client: object,
+    fee_provider: HibachiFeeProvider,
     phase_target_volume_usd: Decimal,
 ) -> bool:
     print(f"phase_preflight_start={run.phase_label}")
@@ -683,11 +856,18 @@ def _print_phase_preflight(
     snapshot = snapshot_result.snapshot
     allowed, reason = _spread_allowed(run, snapshot)
     plan = _round_plan(sizing, run, snapshot, phase_target_volume_usd)
+    cost = _market_cost(run, snapshot, fee_provider)
+    if not cost.eligible:
+        allowed = False
+        reason = cost.reason
     print(
         f"phase={run.phase_label} market={run.market} spread_bps={Decimal(str(snapshot.spread_bps)):.4f} "
         f"average_spread_bps={run.average_spread_bps:.4f} "
         f"max_allowed_spread_bps={run.max_allowed_spread_bps:.4f} "
-        f"trade_allowed={allowed} reason={reason}"
+        f"expected_loss_bps={cost.expected_loss_bps:.4f} "
+        f"entry_fee_bps={cost.entry_fee_bps} exit_fee_bps={cost.exit_fee_bps} "
+        f"slippage_buffer_bps={cost.slippage_buffer_bps} fee_source={cost.fee_source} "
+        f"fee_known={cost.fee_known} trade_allowed={allowed} reason={reason}"
     )
     print(f"phase={run.phase_label} preflight_orderbook_checked_at_utc={_snapshot_timestamp(snapshot)}")
     print(
@@ -695,6 +875,36 @@ def _print_phase_preflight(
         f"planned_one_side_notional_usd={plan.notional_usd:.4f} "
         f"planned_first_side={plan.first_side} planned_second_side={plan.second_side}"
     )
+    fee_base = _fee_base_for_event(fee_provider)
+    planned_gross_volume = plan.notional_usd * Decimal("2")
+    print(
+        "operation_event_preview "
+        f"exchange={run.exchange_id} account_label={run.wallet.group_key} "
+        f"wallet_label={run.wallet.wallet_key} market={run.market} "
+        f"cycle_id={run.phase_label}:preflight environment=production "
+        f"fee_level={fee_base.fee_level or 'unknown'} "
+        f"maker_fee_bps={fee_base.maker_fee_bps} taker_fee_bps={fee_base.taker_fee_bps} "
+        f"entry_fee_bps={cost.entry_fee_bps} exit_fee_bps={cost.exit_fee_bps} "
+        f"fee_source={cost.fee_source} fee_multiplier={run.fee_multiplier} "
+        f"fee_multiplier_expires_at={run.fee_multiplier_expires_at.isoformat() if run.fee_multiplier_expires_at else 'none'} "
+        f"live_spread_bps={Decimal(str(snapshot.spread_bps)):.4f} "
+        f"expected_loss_bps={cost.expected_loss_bps:.4f} "
+        f"planned_gross_volume_usd={planned_gross_volume:.4f} "
+        f"filled_gross_volume_usd=not_available_until_live_fill "
+        f"estimated_fee_usd={_estimated_fee_usd(plan.notional_usd, cost):.8f} "
+        f"estimated_loss_usd={_estimated_loss_usd(plan.notional_usd, cost):.8f} "
+        f"realized_pnl_usd=not_available points_estimate=not_available "
+        f"order_ids=redacted error_reason={'' if allowed else reason} status=preflight"
+    )
+    if args.fast_close_on_fill:
+        print(f"phase={run.phase_label} planned_fast_close=True")
+        print(f"phase={run.phase_label} planned_entry_side={plan.first_side}")
+        print(f"phase={run.phase_label} planned_close_side={_opposite_side(plan.first_side)}")
+        print(f"phase={run.phase_label} post_entry_position_check_skipped=True")
+        if args.prebuild_close_order:
+            print(f"phase={run.phase_label} close_order_prebuild_requested=True")
+            print(f"phase={run.phase_label} close_order_prebuild_supported=False")
+            print(f"phase={run.phase_label} close_prebuild_reason=hibachi_sdk_market_orders_sign_inside_post")
     if plan.quantity <= Decimal("0"):
         print(f"phase={run.phase_label} preflight_warning=planned_quantity_zero")
     return True
@@ -746,6 +956,38 @@ def _spread_allowed(run: MarketRun, snapshot: object) -> tuple[bool, str]:
     if spread_bps > run.max_allowed_spread_bps:
         return False, f"spread_above_hard_cap:{spread_bps:.4f}>{run.max_allowed_spread_bps:.4f}"
     return True, "spread_ok"
+
+
+def _market_cost(run: MarketRun, snapshot: object, fee_provider: HibachiFeeProvider) -> MarketCostResult:
+    return calculate_market_cost(
+        MarketCostInput(
+            exchange_id=run.exchange_id,
+            market=run.market,
+            live_spread_bps=Decimal(str(snapshot.spread_bps)),
+            fee=fee_provider.fee_for_market(run.market),
+        ),
+    )
+
+
+def _fee_base_for_event(fee_provider: HibachiFeeProvider) -> HibachiAccountFee:
+    if fee_provider.account_fee is not None:
+        return fee_provider.account_fee
+    if fee_provider.metadata_fee is not None:
+        return fee_provider.metadata_fee
+    return HibachiAccountFee(
+        fee_level=None,
+        maker_fee_bps=Decimal("0"),
+        taker_fee_bps=Decimal("0"),
+        source="not_available",
+    )
+
+
+def _estimated_fee_usd(one_side_notional_usd: Decimal, cost: MarketCostResult) -> Decimal:
+    return one_side_notional_usd * (cost.entry_fee_bps + cost.exit_fee_bps) / Decimal("10000")
+
+
+def _estimated_loss_usd(one_side_notional_usd: Decimal, cost: MarketCostResult) -> Decimal:
+    return one_side_notional_usd * cost.expected_loss_bps / Decimal("10000")
 
 
 def _effective_spread_cap(run: MarketRun, snapshot: object) -> Decimal:
@@ -833,6 +1075,7 @@ def _run_live_phase(
     phase_target_volume_usd: Decimal,
     phase_markets: list[MarketRun],
     clients: dict[str, object],
+    fee_providers: dict[str, HibachiFeeProvider],
     ledger: WeeklyLedger,
     week: object,
 ) -> Decimal:
@@ -852,6 +1095,8 @@ def _run_live_phase(
     print(f"phase_live_start={phase_label}")
     print(f"phase={phase_label} target_volume_usd={phase_target_volume_usd:.4f}")
     print(f"phase={phase_label} monitored_market_count={len(phase_markets)}")
+    print(f"phase={phase_label} loop_delay_seconds={_loop_delay_seconds(args):.2f}")
+    print(f"phase={phase_label} fast_close_on_fill={args.fast_close_on_fill}")
 
     for cycle in range(1, args.max_cycles_per_phase + 1):
         if _target_reached(live_gross_volume, phase_target_volume_usd):
@@ -862,10 +1107,13 @@ def _run_live_phase(
             )
             return live_gross_volume
 
-        print(f"phase={phase_label} cycle={cycle} entry_delay_seconds={args.min_entry_delay_seconds:.2f}")
-        time.sleep(args.min_entry_delay_seconds)
+        if cycle > 1 and _loop_delay_seconds(args):
+            print(f"phase={phase_label} cycle={cycle} loop_delay_seconds={_loop_delay_seconds(args):.2f}")
+            time.sleep(_loop_delay_seconds(args))
 
+        cycle_started_ns = _now_ns()
         remaining = phase_target_volume_usd - live_gross_volume
+        plan_started_ns = _now_ns()
         _refresh_hibachi_monitor_cache(args, phase_markets, specs, cache, rest_backoff)
         candidates: list[MarketCandidate] = []
         for run in phase_markets:
@@ -879,6 +1127,10 @@ def _run_live_phase(
 
             snapshot = cached.to_market_snapshot(average_spread_bps=run.average_spread_bps)
             allowed, reason = _spread_allowed(run, snapshot)
+            cost = _market_cost(run, snapshot, fee_providers[run.wallet.credential_prefix])
+            if not cost.eligible:
+                allowed = False
+                reason = cost.reason
             round_plan = _round_plan(sizing, run, snapshot, remaining)
             print(
                 f"phase={phase_label} cycle={cycle} market={run.market} market_data_ok=True "
@@ -886,7 +1138,11 @@ def _run_live_phase(
                 f"orderbook_checked_at_utc={_snapshot_timestamp(snapshot)} "
                 f"spread_bps={Decimal(str(snapshot.spread_bps)):.4f} "
                 f"average_spread_bps={Decimal(str(snapshot.average_spread_bps)):.4f} "
-                f"max_allowed_spread_bps={run.max_allowed_spread_bps:.4f} reason={reason} "
+                f"max_allowed_spread_bps={run.max_allowed_spread_bps:.4f} "
+                f"expected_loss_bps={cost.expected_loss_bps:.4f} "
+                f"entry_fee_bps={cost.entry_fee_bps} exit_fee_bps={cost.exit_fee_bps} "
+                f"slippage_buffer_bps={cost.slippage_buffer_bps} fee_source={cost.fee_source} "
+                f"fee_known={cost.fee_known} reason={reason} "
                 f"quantity={round_plan.quantity} one_side_notional_usd={round_plan.notional_usd:.4f}"
             )
 
@@ -898,7 +1154,7 @@ def _run_live_phase(
             spread_bps = Decimal(str(snapshot.spread_bps))
             effective_cap = _effective_spread_cap(run, snapshot)
             spread_ratio = spread_bps / effective_cap if effective_cap > Decimal("0") else spread_bps
-            candidates.append(MarketCandidate(run, snapshot, round_plan, spread_ratio))
+            candidates.append(MarketCandidate(run, snapshot, round_plan, spread_ratio, cost))
 
         if not candidates:
             idle_cycles += 1
@@ -910,14 +1166,16 @@ def _run_live_phase(
         idle_cycles = 0
         selected = min(
             candidates,
-            key=lambda item: (Decimal(str(item.snapshot.spread_bps)), item.spread_ratio, str(item.run.market)),
+            key=lambda item: (item.cost.expected_loss_bps, Decimal(str(item.snapshot.spread_bps)), str(item.run.market)),
         )
         run = selected.run
         snapshot = selected.snapshot
         round_plan = selected.plan
         print(
             f"phase={phase_label} cycle={cycle} selected_market={run.market} "
-            f"selection_rule=lowest_live_spread_bps "
+            f"selection_rule=lowest_expected_loss_bps_then_live_spread_bps "
+            f"expected_loss_bps={selected.cost.expected_loss_bps:.4f} "
+            f"fee_source={selected.cost.fee_source} "
             f"spread_ratio={selected.spread_ratio:.6f} "
             f"orderbook_check_timing=cache_then_selected_market_fresh_verify "
             f"first_side={round_plan.first_side} second_side={round_plan.second_side}"
@@ -936,10 +1194,17 @@ def _run_live_phase(
             continue
         snapshot = fresh_result.snapshot
         allowed, reason = _spread_allowed(run, snapshot)
+        cost = _market_cost(run, snapshot, fee_providers[run.wallet.credential_prefix])
+        if not cost.eligible:
+            allowed = False
+            reason = cost.reason
         round_plan = _round_plan(sizing, run, snapshot, remaining)
         print(
             f"phase={phase_label} cycle={cycle} selected_market={run.market} "
             f"fresh_verify_ok=True spread_bps={Decimal(str(snapshot.spread_bps)):.4f} "
+            f"expected_loss_bps={cost.expected_loss_bps:.4f} "
+            f"entry_fee_bps={cost.entry_fee_bps} exit_fee_bps={cost.exit_fee_bps} "
+            f"slippage_buffer_bps={cost.slippage_buffer_bps} fee_source={cost.fee_source} "
             f"reason={reason} quantity={round_plan.quantity} "
             f"one_side_notional_usd={round_plan.notional_usd:.4f}"
         )
@@ -948,22 +1213,59 @@ def _run_live_phase(
             print(f"phase={phase_label} cycle={cycle} selected_plan_skipped=fresh_verify_failed_or_quantity_zero")
             continue
 
+        round_gross_volume = round_plan.notional_usd * Decimal("2")
+        estimated_fee_usd = _estimated_fee_usd(round_plan.notional_usd, cost)
+        estimated_loss_usd = _estimated_loss_usd(round_plan.notional_usd, cost)
+        fee_base = _fee_base_for_event(fee_providers[run.wallet.credential_prefix])
+        print(
+            "operation_event_preview "
+            f"exchange={run.exchange_id} account_label={run.wallet.group_key} "
+            f"wallet_label={run.wallet.wallet_key} market={run.market} "
+            f"cycle_id={phase_label}:{cycle} environment=production "
+            f"fee_level={fee_base.fee_level or 'unknown'} "
+            f"maker_fee_bps={fee_base.maker_fee_bps} taker_fee_bps={fee_base.taker_fee_bps} "
+            f"entry_fee_bps={cost.entry_fee_bps} exit_fee_bps={cost.exit_fee_bps} "
+            f"fee_source={cost.fee_source} fee_multiplier={run.fee_multiplier} "
+            f"fee_multiplier_expires_at={run.fee_multiplier_expires_at.isoformat() if run.fee_multiplier_expires_at else 'none'} "
+            f"live_spread_bps={Decimal(str(snapshot.spread_bps)):.4f} "
+            f"expected_loss_bps={cost.expected_loss_bps:.4f} "
+            f"planned_gross_volume_usd={round_gross_volume:.4f} "
+            f"filled_gross_volume_usd=not_available_until_live_fill "
+            f"estimated_fee_usd={estimated_fee_usd:.8f} estimated_loss_usd={estimated_loss_usd:.8f} "
+            f"realized_pnl_usd=not_available points_estimate=not_available "
+            f"order_ids=redacted status=planned"
+        )
+
+        print(f"phase={phase_label} cycle={cycle} plan_latency_ms={_elapsed_ms(plan_started_ns)}")
         try:
-            result = execute_roundtrip_plan(
-                adapters[run.wallet.credential_prefix],
-                RoundtripPlan(
-                    market=run.market,
-                    instrument_id=0,
-                    buy_price=Decimal(str(snapshot.best_ask.price)),
-                    sell_price=Decimal(str(snapshot.best_bid.price)),
-                    buy_size=round_plan.quantity,
-                    sell_size=round_plan.quantity,
-                    planned_gross_volume_usd=round_plan.notional_usd * Decimal("2"),
-                    first_side=round_plan.first_side,
-                    second_side=round_plan.second_side,
-                    reason="hibachi_weekly_lowest_live_spread",
-                ),
-            )
+            if args.fast_close_on_fill:
+                result = _execute_fast_close_market_roundtrip(
+                    clients[run.wallet.credential_prefix],
+                    run,
+                    args,
+                    round_plan.quantity,
+                    round_plan.first_side,
+                    one_side_notional_usd=round_plan.notional_usd,
+                    label_prefix=f"phase={phase_label} cycle={cycle}",
+                    cycle_started_ns=cycle_started_ns,
+                    plan_latency_already_logged=True,
+                )
+            else:
+                result = execute_roundtrip_plan(
+                    adapters[run.wallet.credential_prefix],
+                    RoundtripPlan(
+                        market=run.market,
+                        instrument_id=0,
+                        buy_price=Decimal(str(snapshot.best_ask.price)),
+                        sell_price=Decimal(str(snapshot.best_bid.price)),
+                        buy_size=round_plan.quantity,
+                        sell_size=round_plan.quantity,
+                        planned_gross_volume_usd=round_plan.notional_usd * Decimal("2"),
+                        first_side=round_plan.first_side,
+                        second_side=round_plan.second_side,
+                        reason="hibachi_weekly_lowest_live_spread",
+                    ),
+                )
         except Exception as exc:
             print(f"phase={phase_label} stop_reason=live_execution_exception:{exc.__class__.__name__}")
             return live_gross_volume
@@ -976,7 +1278,6 @@ def _run_live_phase(
             print(f"phase={phase_label} stop_reason={status}")
             return live_gross_volume
 
-        round_gross_volume = round_plan.notional_usd * Decimal("2")
         ledger.record_live_round(
             period=week,
             timestamp=datetime.now(timezone.utc),
@@ -996,6 +1297,33 @@ def _run_live_phase(
             first_side=round_plan.first_side,
             second_side=round_plan.second_side,
             status=recorded_status,
+            environment="production",
+            cycle_id=f"{phase_label}:{cycle}",
+            fee_level=fee_base.fee_level,
+            maker_fee_bps=float(fee_base.maker_fee_bps),
+            taker_fee_bps=float(fee_base.taker_fee_bps),
+            entry_fee_bps=float(cost.entry_fee_bps),
+            exit_fee_bps=float(cost.exit_fee_bps),
+            fee_source=cost.fee_source,
+            fee_multiplier=float(run.fee_multiplier),
+            fee_multiplier_expires_at=(
+                run.fee_multiplier_expires_at.isoformat() if run.fee_multiplier_expires_at else None
+            ),
+            live_spread_bps=float(Decimal(str(snapshot.spread_bps))),
+            expected_loss_bps=float(cost.expected_loss_bps),
+            filled_gross_volume_usd=float(result.estimated_gross_volume_usd)
+            if hasattr(result, "estimated_gross_volume_usd")
+            else None,
+            estimated_fee_usd=float(estimated_fee_usd),
+            estimated_loss_usd=float(estimated_loss_usd),
+            realized_pnl_usd=None,
+            points_estimate=None,
+            start_position_count=None,
+            final_position_count=(0 if getattr(result, "final_all_flat", False) else None),
+            start_open_order_count=None,
+            final_open_order_count=getattr(result, "final_open_order_count", None),
+            order_ids="redacted",
+            error_reason="" if recorded_status in {"ok_flat", "residual_closed_continue"} else recorded_status,
         )
         print(
             f"phase={phase_label} cycle={cycle} market={run.market} "
@@ -1015,6 +1343,42 @@ def _run_live_phase(
 
     print(f"phase={phase_label} stop_reason=max_cycles_reached:{args.max_cycles_per_phase}")
     return live_gross_volume
+
+
+def _loop_delay_seconds(args: argparse.Namespace) -> float:
+    if args.loop_delay_seconds is not None:
+        return float(args.loop_delay_seconds)
+    return float(args.min_entry_delay_seconds)
+
+
+def _print_weekly_final_state(
+    runs: list[MarketRun],
+    clients: dict[str, object],
+    estimated_gross_volume_usd: Decimal,
+) -> None:
+    print(f"final_estimated_gross_volume_usd={estimated_gross_volume_usd:.4f}")
+    all_flat = True
+    seen: set[tuple[str, str]] = set()
+    for run in runs:
+        state_key = (run.wallet.credential_prefix, run.market)
+        if state_key in seen:
+            continue
+        seen.add(state_key)
+        client = clients[run.wallet.credential_prefix]
+        ok, direction, quantity, reason = _read_position(client, run.market)
+        open_order_count = _open_order_count(client, run.market)
+        if not ok or quantity > Decimal("0") or open_order_count != 0:
+            all_flat = False
+        print(
+            "final_market_state "
+            f"phase={run.phase_label} wallet={run.wallet.wallet_key} market={run.market} "
+            f"position_ok={ok} position_reason={reason} "
+            f"final_open_order_count={open_order_count if open_order_count is not None else 'unknown'} "
+            f"final_position_direction={direction or 'flat'} "
+            f"final_position_size={quantity} "
+            f"final_position_steps=not_available_for_hibachi_sdk"
+        )
+    print(f"final_all_flat={all_flat}")
 
 
 def _target_reached(volume_usd: Decimal, target_usd: Decimal) -> bool:

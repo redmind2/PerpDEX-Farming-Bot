@@ -9,43 +9,37 @@ from urllib.request import Request, urlopen
 from perpdex_farming_bot.env import normalize_env_prefix
 
 
-DEFAULT_RISEX_TESTNET_API_ENDPOINT = "https://api.testnet.rise.trade"
-DEFAULT_RISEX_TESTNET_WSS_ENDPOINT = "wss://ws.testnet.rise.trade"
-DEFAULT_RISEX_PRODUCTION_API_ENDPOINT = "https://api.rise.trade"
-DEFAULT_RISEX_PRODUCTION_WSS_ENDPOINT = "wss://ws.risex.trade"
+DEFAULT_PACIFICA_PRODUCTION_API_ENDPOINT = "https://api.pacifica.fi/api/v1"
+DEFAULT_PACIFICA_TESTNET_API_ENDPOINT = "https://test-api.pacifica.fi/api/v1"
+DEFAULT_PACIFICA_PRODUCTION_WSS_ENDPOINT = "wss://ws.pacifica.fi/ws"
+DEFAULT_PACIFICA_TESTNET_WSS_ENDPOINT = "wss://test-ws.pacifica.fi/ws"
 
 PUBLIC_GET_PATHS = {
-    "/v1/markets",
-    "/v1/orderbook",
-    "/v1/system/config",
-    "/v1/auth/eip712-domain",
+    "/info",
+    "/book",
+    "/prices",
 }
 
 PRIVATE_READONLY_GET_PATHS = {
-    "/v1/account/balance",
-    "/v1/auth/session-key-status",
-    "/v1/auth/signers",
-    "/v1/orders/open",
-    "/v1/positions",
-    "/v1/trade-history",
+    "/account",
+    "/orders",
+    "/orders/history",
+    "/orders/history_by_id",
+    "/positions",
 }
-
-PRIVATE_READONLY_DYNAMIC_PATH_PREFIXES = (
-    "/v1/nonce-state/",
-)
 
 ALLOWED_QUERY_PARAMS = {
-    "/v1/markets": {"force_refresh", "market_ids"},
-    "/v1/orderbook": {"market_id", "limit"},
-    "/v1/system/config": set(),
-    "/v1/auth/eip712-domain": set(),
-    "/v1/account/balance": {"account", "token"},
-    "/v1/auth/session-key-status": {"account", "signer"},
-    "/v1/auth/signers": {"account"},
-    "/v1/orders/open": {"account", "market_id", "start_index", "limit", "order_ids"},
-    "/v1/positions": {"market_id", "account", "page", "page_size"},
-    "/v1/trade-history": {"account", "limit", "market_id", "page", "sorted_by"},
+    "/info": set(),
+    "/prices": set(),
+    "/book": {"symbol", "agg_level"},
+    "/account": {"account"},
+    "/orders": {"account"},
+    "/orders/history": {"account", "limit", "cursor"},
+    "/orders/history_by_id": {"order_id"},
+    "/positions": {"account"},
 }
+
+ALLOWED_AGG_LEVELS = {1, 10, 100, 1000, 10000}
 
 SECRETISH_QUERY_NAMES = {
     "api_key",
@@ -58,13 +52,11 @@ SECRETISH_QUERY_NAMES = {
     "session",
     "session_key",
     "signature",
-    "signer_private_key",
-    "token_secret",
+    "token",
 }
 
 REDACTED_QUERY_NAMES = {
     "account",
-    "signer",
     "signature",
     "token",
 }
@@ -73,12 +65,12 @@ BODY_SHAPE_READ_LIMIT_BYTES = 65536
 JSON_READ_LIMIT_BYTES = 1048576
 
 
-class RisexReadonlyConfigError(ValueError):
-    """Raised when a RiseX read-only check would exceed the current safety boundary."""
+class PacificaReadonlyConfigError(ValueError):
+    """Raised when a Pacifica read-only check would exceed the current safety boundary."""
 
 
 @dataclass(frozen=True)
-class RisexReadonlyHttpResult:
+class PacificaReadonlyHttpResult:
     url: str
     safe_url: str
     ok: bool
@@ -88,33 +80,33 @@ class RisexReadonlyHttpResult:
     error: str
 
 
-def normalize_risex_environment(environment: str) -> str:
+def normalize_pacifica_environment(environment: str) -> str:
     normalized = normalize_env_prefix(environment)
     if normalized in {"MAINNET", "PROD", "PRODUCTION"}:
         return "PRODUCTION"
     if normalized in {"TEST", "TESTNET"}:
         return "TESTNET"
-    raise RisexReadonlyConfigError("RiseX environment must be production/mainnet or testnet")
+    raise PacificaReadonlyConfigError("Pacifica environment must be production/mainnet or testnet")
 
 
 def default_api_endpoint(environment: str) -> str:
-    if normalize_risex_environment(environment) == "TESTNET":
-        return DEFAULT_RISEX_TESTNET_API_ENDPOINT
-    return DEFAULT_RISEX_PRODUCTION_API_ENDPOINT
+    if normalize_pacifica_environment(environment) == "TESTNET":
+        return DEFAULT_PACIFICA_TESTNET_API_ENDPOINT
+    return DEFAULT_PACIFICA_PRODUCTION_API_ENDPOINT
 
 
 def default_wss_endpoint(environment: str) -> str:
-    if normalize_risex_environment(environment) == "TESTNET":
-        return DEFAULT_RISEX_TESTNET_WSS_ENDPOINT
-    return DEFAULT_RISEX_PRODUCTION_WSS_ENDPOINT
+    if normalize_pacifica_environment(environment) == "TESTNET":
+        return DEFAULT_PACIFICA_TESTNET_WSS_ENDPOINT
+    return DEFAULT_PACIFICA_PRODUCTION_WSS_ENDPOINT
 
 
 def api_endpoint_env_name(environment: str) -> str:
-    return f"RISEX_API_ENDPOINT_{normalize_risex_environment(environment)}"
+    return f"PACIFICA_API_ENDPOINT_{normalize_pacifica_environment(environment)}"
 
 
 def wss_endpoint_env_name(environment: str) -> str:
-    return f"RISEX_WSS_ENDPOINT_{normalize_risex_environment(environment)}"
+    return f"PACIFICA_WSS_ENDPOINT_{normalize_pacifica_environment(environment)}"
 
 
 def endpoint_from_env(value: str | None, default: str) -> str:
@@ -123,16 +115,16 @@ def endpoint_from_env(value: str | None, default: str) -> str:
 
 def validate_https_base_url(name: str, value: str) -> str:
     if not value:
-        raise RisexReadonlyConfigError(f"{name} is required for this RiseX environment")
+        raise PacificaReadonlyConfigError(f"{name} is required for this Pacifica environment")
     parsed = urlparse(value)
     if parsed.scheme != "https":
-        raise RisexReadonlyConfigError(f"{name} must use https")
+        raise PacificaReadonlyConfigError(f"{name} must use https")
     if not parsed.netloc:
-        raise RisexReadonlyConfigError(f"{name} must include a host")
+        raise PacificaReadonlyConfigError(f"{name} must include a host")
     if parsed.username or parsed.password:
-        raise RisexReadonlyConfigError(f"{name} must not include username or password")
+        raise PacificaReadonlyConfigError(f"{name} must not include username or password")
     if parsed.query or parsed.fragment:
-        raise RisexReadonlyConfigError(f"{name} must not include query string or fragment")
+        raise PacificaReadonlyConfigError(f"{name} must not include query string or fragment")
 
     path = parsed.path.rstrip("/")
     return f"{parsed.scheme}://{parsed.netloc}{path}"
@@ -140,47 +132,52 @@ def validate_https_base_url(name: str, value: str) -> str:
 
 def validate_wss_url(name: str, value: str) -> str:
     if not value:
-        raise RisexReadonlyConfigError(f"{name} is required for this RiseX environment")
+        raise PacificaReadonlyConfigError(f"{name} is required for this Pacifica environment")
     parsed = urlparse(value)
     if parsed.scheme != "wss":
-        raise RisexReadonlyConfigError(f"{name} must use wss")
+        raise PacificaReadonlyConfigError(f"{name} must use wss")
     if not parsed.netloc:
-        raise RisexReadonlyConfigError(f"{name} must include a host")
+        raise PacificaReadonlyConfigError(f"{name} must include a host")
     if parsed.username or parsed.password:
-        raise RisexReadonlyConfigError(f"{name} must not include username or password")
+        raise PacificaReadonlyConfigError(f"{name} must not include username or password")
     if parsed.query or parsed.fragment:
-        raise RisexReadonlyConfigError(f"{name} must not include query string or fragment")
+        raise PacificaReadonlyConfigError(f"{name} must not include query string or fragment")
     return value.rstrip("/")
 
 
 def validate_readonly_path(path: str, *, private_readonly: bool = False) -> str:
     parsed = urlparse(path)
     if parsed.scheme or parsed.netloc:
-        raise RisexReadonlyConfigError("RiseX read-only paths must be relative paths, not full URLs")
+        raise PacificaReadonlyConfigError("Pacifica read-only paths must be relative paths, not full URLs")
     if not parsed.path.startswith("/"):
-        raise RisexReadonlyConfigError("RiseX read-only paths must start with /")
-    if parsed.query or parsed.fragment:
-        raise RisexReadonlyConfigError("Pass query values separately, not inside the path")
-
-    if private_readonly and _is_private_readonly_dynamic_path(parsed.path):
-        return parsed.path
+        raise PacificaReadonlyConfigError("Pacifica read-only paths must start with /")
 
     allowed = PRIVATE_READONLY_GET_PATHS if private_readonly else PUBLIC_GET_PATHS
     if parsed.path not in allowed:
         scope = "private read-only" if private_readonly else "public"
-        raise RisexReadonlyConfigError(f"RiseX {scope} path is not allowlisted: {parsed.path}")
+        raise PacificaReadonlyConfigError(f"Pacifica {scope} path is not allowlisted: {parsed.path}")
+    if parsed.query or parsed.fragment:
+        raise PacificaReadonlyConfigError("Pass query values separately, not inside the path")
     return parsed.path
 
 
 def validate_query_params(path: str, query: dict[str, object]) -> None:
-    allowed = _allowed_query_params(path)
+    allowed = ALLOWED_QUERY_PARAMS.get(path, set())
     for key, value in query.items():
         normalized_key = key.replace("-", "_").lower()
         if normalized_key in SECRETISH_QUERY_NAMES:
-            raise RisexReadonlyConfigError(f"query.{key} must not contain secret-like values")
+            raise PacificaReadonlyConfigError(f"query.{key} must not contain secret-like values")
         if key not in allowed:
-            raise RisexReadonlyConfigError(f"query.{key} is not allowlisted for {path}")
+            raise PacificaReadonlyConfigError(f"query.{key} is not allowlisted for {path}")
         _assert_query_value_is_simple(key, value)
+        if key == "agg_level" and value not in ("", None):
+            try:
+                agg_level = int(str(value))
+            except ValueError as exc:
+                raise PacificaReadonlyConfigError("query.agg_level must be an integer") from exc
+            if agg_level not in ALLOWED_AGG_LEVELS:
+                allowed_text = ",".join(str(item) for item in sorted(ALLOWED_AGG_LEVELS))
+                raise PacificaReadonlyConfigError(f"query.agg_level must be one of {allowed_text}")
 
 
 def read_only_get(
@@ -190,8 +187,8 @@ def read_only_get(
     timeout_seconds: float,
     *,
     private_readonly: bool = False,
-) -> RisexReadonlyHttpResult:
-    base = validate_https_base_url("RISEX_API_ENDPOINT", base_url)
+) -> PacificaReadonlyHttpResult:
+    base = validate_https_base_url("PACIFICA_API_ENDPOINT", base_url)
     path = validate_readonly_path(path, private_readonly=private_readonly)
     validate_query_params(path, query)
     url = _url_with_query(base, path, query)
@@ -199,7 +196,7 @@ def read_only_get(
         url,
         headers={
             "Accept": "application/json",
-            "User-Agent": "perpdex-farming-bot-risex-readonly-smoke",
+            "User-Agent": "perpdex-farming-bot-pacifica-readonly-smoke",
         },
         method="GET",
     )
@@ -209,7 +206,7 @@ def read_only_get(
             body = response.read(BODY_SHAPE_READ_LIMIT_BYTES)
             content_type = response.headers.get("Content-Type", "")
             status_code = response.getcode()
-            return RisexReadonlyHttpResult(
+            return PacificaReadonlyHttpResult(
                 url=url,
                 safe_url=_safe_url(url),
                 ok=200 <= status_code < 300,
@@ -219,7 +216,7 @@ def read_only_get(
                 error="",
             )
     except HTTPError as exc:
-        return RisexReadonlyHttpResult(
+        return PacificaReadonlyHttpResult(
             url=url,
             safe_url=_safe_url(url),
             ok=False,
@@ -229,7 +226,7 @@ def read_only_get(
             error=exc.reason or "http_error",
         )
     except (TimeoutError, URLError) as exc:
-        return RisexReadonlyHttpResult(
+        return PacificaReadonlyHttpResult(
             url=url,
             safe_url=_safe_url(url),
             ok=False,
@@ -248,27 +245,20 @@ def read_only_get_json(
     *,
     private_readonly: bool = False,
 ) -> object:
-    base = validate_https_base_url("RISEX_API_ENDPOINT", base_url)
+    base = validate_https_base_url("PACIFICA_API_ENDPOINT", base_url)
     path = validate_readonly_path(path, private_readonly=private_readonly)
     validate_query_params(path, query)
     request = Request(
         _url_with_query(base, path, query),
         headers={
             "Accept": "application/json",
-            "User-Agent": "perpdex-farming-bot-risex-readonly",
+            "User-Agent": "perpdex-farming-bot-pacifica-readonly",
         },
         method="GET",
     )
     with urlopen(request, timeout=timeout_seconds) as response:
         response_body = response.read(JSON_READ_LIMIT_BYTES)
     return json.loads(response_body.decode("utf-8"))
-
-
-def nonce_state_path(account: str) -> str:
-    normalized = account.strip()
-    if not _looks_like_evm_address(normalized):
-        raise RisexReadonlyConfigError("RiseX account address must look like a 0x EVM address")
-    return f"/v1/nonce-state/{normalized}"
 
 
 def _url_with_query(base_url: str, path: str, query: dict[str, object]) -> str:
@@ -288,11 +278,8 @@ def _url_with_query(base_url: str, path: str, query: dict[str, object]) -> str:
 
 def _safe_url(url: str) -> str:
     parsed = urlparse(url)
-    safe_path = parsed.path
-    if safe_path.startswith("/v1/nonce-state/"):
-        safe_path = "/v1/nonce-state/[redacted]"
     if not parsed.query:
-        return urlunparse((parsed.scheme, parsed.netloc, safe_path, "", "", ""))
+        return url
     safe_pairs: list[tuple[str, str]] = []
     for chunk in parsed.query.split("&"):
         if not chunk:
@@ -303,26 +290,7 @@ def _safe_url(url: str) -> str:
         else:
             safe_pairs.append((key, value))
     safe_query = "&".join(f"{key}={value}" for key, value in safe_pairs)
-    return urlunparse((parsed.scheme, parsed.netloc, safe_path, "", safe_query, ""))
-
-
-def _allowed_query_params(path: str) -> set[str]:
-    if _is_private_readonly_dynamic_path(path):
-        return set()
-    return ALLOWED_QUERY_PARAMS.get(path, set())
-
-
-def _is_private_readonly_dynamic_path(path: str) -> bool:
-    for prefix in PRIVATE_READONLY_DYNAMIC_PATH_PREFIXES:
-        if path.startswith(prefix):
-            return _looks_like_evm_address(path.removeprefix(prefix))
-    return False
-
-
-def _looks_like_evm_address(value: str) -> bool:
-    if len(value) != 42 or not value.startswith(("0x", "0X")):
-        return False
-    return all(character in "0123456789abcdefABCDEF" for character in value[2:])
+    return urlunparse((parsed.scheme, parsed.netloc, parsed.path, "", safe_query, ""))
 
 
 def _assert_query_value_is_simple(key: str, value: object) -> None:
@@ -332,7 +300,7 @@ def _assert_query_value_is_simple(key: str, value: object) -> None:
         return
     if isinstance(value, (list, tuple)) and all(isinstance(item, (str, int, float, bool)) for item in value):
         return
-    raise RisexReadonlyConfigError(f"query.{key} must be a simple scalar or list of scalars")
+    raise PacificaReadonlyConfigError(f"query.{key} must be a simple scalar or list of scalars")
 
 
 def _body_shape(body: bytes, content_type: str) -> str:

@@ -1,0 +1,101 @@
+{
+  "environment": "production",
+  "target_gross_volume_usd": "1000",
+  "order_notional_usd": "100",
+  "level_size_fraction": "0.5",
+  "threshold_source": "24h",
+  "markets": [
+    {
+      "symbol": "BTC",
+      "display_market": "BTC-PERP",
+      "current_spread_bps": "0.16",
+      "spread_5m_bps": "0.16",
+      "spread_1h_bps": "0.16",
+      "spread_24h_bps": "0.16"
+    },
+    {
+      "symbol": "CL",
+      "display_market": "CL-PERP",
+      "current_spread_bps": "0.29",
+      "spread_5m_bps": "0.69",
+      "spread_1h_bps": "1.01",
+      "spread_24h_bps": "0.82",
+      "fee_multiplier": "0.5",
+      "fee_multiplier_expires_at": "2026-07-14T00:00:00+00:00"
+    },
+    {
+      "symbol": "ETH",
+      "display_market": "ETH-PERP",
+      "current_spread_bps": "0.57",
+      "spread_5m_bps": "0.57",
+      "spread_1h_bps": "0.57",
+      "spread_24h_bps": "0.56"
+    },
+    {
+      "symbol": "XAU",
+      "display_market": "GOLD-PERP",
+      "current_spread_bps": "0.24",
+      "spread_5m_bps": "0.24",
+      "spread_1h_bps": "0.46",
+      "spread_24h_bps": "0.76",
+      "fee_multiplier": "0.5",
+      "fee_multiplier_expires_at": "2026-07-14T00:00:00+00:00"
+    },
+    {
+      "symbol": "HYPE",
+      "display_market": "HYPE-PERP",
+      "current_spread_bps": "0.14",
+      "spread_5m_bps": "0.14",
+      "spread_1h_bps": "0.15",
+      "spread_24h_bps": "0.29"
+    },
+    {
+      "symbol": "PAXG",
+      "display_market": "PAXG-PERP",
+      "current_spread_bps": "0.48",
+      "spread_5m_bps": "1.15",
+      "spread_1h_bps": "0.79",
+      "spread_24h_bps": "1.28",
+      "fee_multiplier": "0.5",
+      "fee_multiplier_expires_at": "2026-07-14T00:00:00+00:00"
+    },
+    {
+      "symbol": "SAMSUNG",
+      "display_market": "SAMSUNG-PERP",
+      "current_spread_bps": "29.39",
+      "spread_5m_bps": "26.02",
+      "spread_1h_bps": "23.32",
+      "spread_24h_bps": "16.13",
+      "fee_multiplier": "0.5",
+      "fee_multiplier_expires_at": "2026-07-14T00:00:00+00:00"
+    },
+    {
+      "symbol": "XAG",
+      "display_market": "SILVER-PERP",
+      "current_spread_bps": "4.20",
+      "spread_5m_bps": "1.90",
+      "spread_1h_bps": "1.74",
+      "spread_24h_bps": "1.73",
+      "fee_multiplier": "0.5",
+      "fee_multiplier_expires_at": "2026-07-14T00:00:00+00:00"
+    },
+    {
+      "symbol": "SKHYNIX",
+      "display_market": "SKHYNIX-PERP",
+      "current_spread_bps": "8.46",
+      "spread_5m_bps": "7.97",
+      "spread_1h_bps": "5.98",
+      "spread_24h_bps": "5.56",
+      "fee_multiplier": "0.5",
+      "fee_multiplier_expires_at": "2026-07-14T00:00:00+00:00"
+    },
+    {
+      "symbol": "SOL",
+      "display_market": "SOL-PERP",
+      "current_spread_bps": "1.25",
+      "spread_5m_bps": "1.25",
+      "spread_1h_bps": "1.24",
+      "spread_24h_bps": "1.24"
+    }
+  ]
+}

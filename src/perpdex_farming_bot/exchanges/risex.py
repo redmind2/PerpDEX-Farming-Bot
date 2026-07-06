@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 
 from perpdex_farming_bot.connectors.risex_readonly import read_only_get_json
+from perpdex_farming_bot.connectors.risex_trading import RisexPostResult, RisexSignedPlaceOrder, post_place_order
 from perpdex_farming_bot.credentials import read_risex_credentials, read_risex_private_readonly_params
 from perpdex_farming_bot.exchanges.base import (
     AdapterError,
@@ -25,6 +26,11 @@ class RisexAdapter:
     allow_live_orders: bool = False
 
     exchange_id: str = "risex"
+
+    def submit_signed_place_order(self, signed_order: RisexSignedPlaceOrder) -> RisexPostResult:
+        if not self.allow_live_orders:
+            raise AdapterError("RiseX live orders are disabled; set allow_live_orders=True only for explicit live tests")
+        return post_place_order(self.api_endpoint, signed_order, self.timeout_seconds)
 
     def list_positions(self) -> tuple[ExchangePosition, ...]:
         params = read_risex_private_readonly_params(self.credential_prefix, self.environment)
@@ -67,7 +73,15 @@ class RisexAdapter:
             return False, "missing_signer_address"
         if not credentials["signer_private_key"]:
             return False, "missing_signer_private_key"
-        return True, "signer_env_present_not_registered_verified"
+        try:
+            from eth_account import Account
+
+            derived = Account.from_key(credentials["signer_private_key"]).address
+        except Exception:
+            return False, "invalid_signer_private_key"
+        if derived.casefold() != credentials["signer_address"].casefold():
+            return False, "signer_private_key_does_not_match_signer_address"
+        return True, "signer_env_present_key_matches_signer_address"
 
     def execute_paired_notional_roundtrip(
         self,

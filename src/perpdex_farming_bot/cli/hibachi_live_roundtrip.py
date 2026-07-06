@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import time
+from dataclasses import dataclass
 from decimal import Decimal, ROUND_DOWN
 from pathlib import Path
 from typing import Literal
@@ -19,6 +20,19 @@ from perpdex_farming_bot.env import get_env, load_dotenv_if_present
 
 
 CONFIRM_TEXT = "LIVE_HIBACHI_BTC_MARKET_ROUNDTRIP"
+TARGET_VOLUME_TOLERANCE_USD = Decimal("0.01")
+
+
+@dataclass(frozen=True)
+class HibachiFastCloseResult:
+    success: bool
+    status: str
+    estimated_gross_volume_usd: Decimal
+    entry_order_id: str | None = None
+    close_order_id: str | None = None
+    final_open_order_count: int | None = None
+    final_position_size: Decimal = Decimal("0")
+    final_all_flat: bool = False
 
 
 def main() -> None:
@@ -61,6 +75,30 @@ def main() -> None:
         help=(
             "Minimum delay between live entry batches. The next cycle checks spread again after this delay. "
             "Residual ReduceOnly rescue closes are still sent immediately."
+        ),
+    )
+    parser.add_argument(
+        "--loop-delay-seconds",
+        type=float,
+        default=None,
+        help=(
+            "Delay before the next live cycle. If omitted, the legacy --min-entry-delay-seconds value is used."
+        ),
+    )
+    parser.add_argument(
+        "--fast-close-on-fill",
+        action="store_true",
+        help=(
+            "Submit the reduce-only close immediately after a successful entry market POST, "
+            "without waiting for a position REST check between orders."
+        ),
+    )
+    parser.add_argument(
+        "--prebuild-close-order",
+        action="store_true",
+        help=(
+            "Request close-order prebuild before entry. Hibachi SDK market orders sign inside POST, "
+            "so this currently logs unsupported and still uses SDK-internal signing."
         ),
     )
     parser.add_argument("--fill-lookup-attempts", type=int, default=5)
@@ -121,6 +159,10 @@ def main() -> None:
         raise SystemExit("--poll-seconds must be zero or greater")
     if args.min_entry_delay_seconds < 1:
         raise SystemExit("--min-entry-delay-seconds must be at least 1 for live safety")
+    if args.loop_delay_seconds is not None and args.loop_delay_seconds < 0:
+        raise SystemExit("--loop-delay-seconds must be zero or greater")
+    if args.prebuild_close_order and not args.fast_close_on_fill:
+        raise SystemExit("--prebuild-close-order requires --fast-close-on-fill")
     if args.fill_lookup_attempts <= 0:
         raise SystemExit("--fill-lookup-attempts must be greater than zero")
     if args.fill_lookup_delay_seconds < 0:
@@ -156,6 +198,11 @@ def main() -> None:
     print(f"target_gross_volume_usd={args.target_gross_volume_usd}")
     print(f"max_fees_percent={args.max_fees_percent}")
     print(f"min_entry_delay_seconds={args.min_entry_delay_seconds}")
+    print(f"loop_delay_seconds={_entry_delay_seconds(args):.2f}")
+    print(f"fast_close_on_fill={args.fast_close_on_fill}")
+    print(f"prebuild_close_order={args.prebuild_close_order}")
+    print("close_prebuild_supported=False")
+    print("hibachi_signing_mode=sdk_internal_at_post")
     print(f"entry_mode={args.entry_mode}")
     print(f"close_mode={args.close_mode}")
 
@@ -188,7 +235,13 @@ def main() -> None:
     print(f"best_ask={snapshot.best_ask.price}")
     print(f"planned_quantity_btc={quantity}")
     print(f"planned_one_side_notional_usd={notional:.4f}")
-    if args.entry_mode == "paired-market-batch":
+    if args.fast_close_on_fill:
+        print(f"planned_entry_side={first_side}")
+        print(f"planned_close_side={_opposite_side(first_side)}")
+        print("planned_entry=single_market_order")
+        print("planned_close=immediate_reduce_only_market_close_same_quantity_without_position_read")
+        print("planned_final_check=position_and_open_orders_after_roundtrip")
+    elif args.entry_mode == "paired-market-batch":
         print(f"planned_first_market_side={first_side}")
         print(f"planned_second_market_side={second_side}")
         print("planned_entry=market_buy_and_market_sell_same_quantity_in_one_batch")
@@ -243,6 +296,17 @@ def main() -> None:
 
     if args.target_gross_volume_usd > Decimal("0"):
         _run_live_volume_loop(args, config, run_config, assignment, data_hub, client)
+        return
+
+    if args.fast_close_on_fill:
+        _execute_fast_close_market_roundtrip(
+            client,
+            assignment,
+            args,
+            quantity,
+            first_side,
+            one_side_notional_usd=notional,
+        )
         return
 
     if args.entry_mode == "paired-market-batch":
@@ -359,7 +423,7 @@ def _run_live_volume_loop(
     data_hub: DataHubReadonlyConnector | None,
     client: object,
 ) -> None:
-    if args.entry_mode != "paired-market-batch":
+    if args.entry_mode != "paired-market-batch" and not args.fast_close_on_fill:
         print("live_loop_aborted=target_volume_requires_paired_market_batch")
         return
 
@@ -371,11 +435,16 @@ def _run_live_volume_loop(
     print("spread_check_timing=after_entry_delay_before_each_batch")
 
     for cycle in range(1, args.max_cycles + 1):
-        if live_gross_volume >= args.target_gross_volume_usd:
+        if _target_reached(live_gross_volume, args.target_gross_volume_usd):
             print(f"stop_reason=target_volume_reached:{live_gross_volume:.4f}>={args.target_gross_volume_usd:.4f}")
+            print(f"final_estimated_gross_volume_usd={live_gross_volume:.4f}")
             return
 
+        cycle_started_ns = _now_ns()
+        plan_started_ns = _now_ns()
+
         snapshot_result = _load_snapshot(args, run_config, assignment, data_hub)
+        print(f"cycle={cycle} plan_latency_ms={_elapsed_ms(plan_started_ns)}")
         if not snapshot_result.ok or snapshot_result.snapshot is None:
             idle_cycles += 1
             print(f"cycle={cycle} market_data_ok=False reason={snapshot_result.reason}")
@@ -420,9 +489,24 @@ def _run_live_volume_loop(
                 time.sleep(args.poll_seconds)
             continue
 
-        status = _execute_paired_market_batch(client, assignment, args, quantity, first_side, second_side)
+        if args.fast_close_on_fill:
+            result = _execute_fast_close_market_roundtrip(
+                client,
+                assignment,
+                args,
+                quantity,
+                first_side,
+                one_side_notional_usd=notional,
+                label_prefix=f"cycle={cycle}",
+                cycle_started_ns=cycle_started_ns,
+                plan_latency_already_logged=True,
+            )
+            status = result.status
+        else:
+            status = _execute_paired_market_batch(client, assignment, args, quantity, first_side, second_side)
         if status != "ok_flat":
             print(f"stop_reason={status}")
+            print(f"final_estimated_gross_volume_usd={live_gross_volume:.4f}")
             return
 
         round_gross_volume = notional * Decimal("2")
@@ -430,19 +514,27 @@ def _run_live_volume_loop(
         print(f"cycle={cycle} live_round_gross_volume_usd={round_gross_volume:.4f}")
         print(f"live_total_gross_volume_usd={live_gross_volume:.4f}")
 
-        if live_gross_volume >= args.target_gross_volume_usd:
+        if _target_reached(live_gross_volume, args.target_gross_volume_usd):
             print(f"stop_reason=target_volume_reached:{live_gross_volume:.4f}>={args.target_gross_volume_usd:.4f}")
+            print(f"final_estimated_gross_volume_usd={live_gross_volume:.4f}")
             return
         entry_delay = _entry_delay_seconds(args)
         if entry_delay:
-            print(f"next_entry_delay_seconds={entry_delay:.2f}")
+            print(f"next_loop_delay_seconds={entry_delay:.2f}")
             time.sleep(entry_delay)
 
     print(f"stop_reason=max_cycles_reached:{args.max_cycles}")
+    print(f"final_estimated_gross_volume_usd={live_gross_volume:.4f}")
 
 
 def _entry_delay_seconds(args: argparse.Namespace) -> float:
+    if getattr(args, "loop_delay_seconds", None) is not None:
+        return float(args.loop_delay_seconds)
     return max(float(args.poll_seconds), float(args.min_entry_delay_seconds))
+
+
+def _target_reached(volume_usd: Decimal, target_usd: Decimal) -> bool:
+    return volume_usd + TARGET_VOLUME_TOLERANCE_USD >= target_usd
 
 
 def _live_spread_allowed(config: object, snapshot: object) -> tuple[bool, str]:
@@ -568,6 +660,169 @@ def _execute_paired_market_batch(
     if final_qty <= Decimal("0"):
         return "residual_closed_stop_for_review"
     return "residual_close_failed_position_remains"
+
+
+def _execute_fast_close_market_roundtrip(
+    client: object,
+    assignment: object,
+    args: argparse.Namespace,
+    quantity: Decimal,
+    entry_side: Literal["BUY", "SELL"],
+    *,
+    one_side_notional_usd: Decimal | None = None,
+    label_prefix: str = "",
+    cycle_started_ns: int | None = None,
+    plan_latency_already_logged: bool = False,
+) -> HibachiFastCloseResult:
+    from hibachi_xyz.types import OrderFlags, Side
+
+    prefix = f"{label_prefix} " if label_prefix else ""
+    cycle_started = cycle_started_ns or _now_ns()
+    plan_started_ns = _now_ns()
+    close_side_name = _opposite_side(entry_side)
+    side_lookup = {"BUY": Side.BUY, "SELL": Side.SELL}
+    estimated_gross = (one_side_notional_usd or Decimal("0")) * Decimal("2")
+
+    if not plan_latency_already_logged:
+        print(f"{prefix}plan_latency_ms={_elapsed_ms(plan_started_ns)}")
+    print(f"{prefix}fast_close_on_fill=True")
+    print(f"{prefix}entry_side={entry_side}")
+    print(f"{prefix}close_side={close_side_name}")
+    print(f"{prefix}close_quantity_source=planned_entry_quantity")
+    print(f"{prefix}partial_fill_handling=reduce_only_close_uses_planned_quantity_without_fill_ws")
+
+    if getattr(args, "prebuild_close_order", False):
+        close_prebuild_started_ns = _now_ns()
+        print(f"{prefix}close_order_prebuild_requested=True")
+        print(f"{prefix}close_order_prebuild_supported=False")
+        print(f"{prefix}close_prebuild_reason=hibachi_sdk_market_orders_sign_inside_post")
+        print(f"{prefix}close_prebuild_sign_latency_ms={_elapsed_ms(close_prebuild_started_ns)}")
+
+    entry_sign_started_ns = _now_ns()
+    print(f"{prefix}entry_sign_latency_ms={_elapsed_ms(entry_sign_started_ns)}")
+    print(f"{prefix}entry_sign_latency_source=sdk_internal_not_separately_measured")
+    print(f"{prefix}entry_submitting=True")
+    entry_post_started_ns = _now_ns()
+    try:
+        entry_nonce, entry_order_id = client.place_market_order(
+            assignment.market,
+            str(quantity),
+            side_lookup[entry_side],
+            args.max_fees_percent,
+        )
+    except Exception as exc:
+        entry_post_done_ns = _now_ns()
+        print(f"{prefix}entry_post_latency_ms={_elapsed_ms(entry_post_started_ns, entry_post_done_ns)}")
+        print(f"{prefix}entry_order_failed=True")
+        print(f"{prefix}entry_error_type={exc.__class__.__name__}")
+        print(f"{prefix}cycle_total_latency_ms={_elapsed_ms(cycle_started, entry_post_done_ns)}")
+        return HibachiFastCloseResult(False, "entry_order_failed", estimated_gross)
+
+    entry_post_done_ns = _now_ns()
+    print(f"{prefix}entry_submitted=True")
+    print(f"{prefix}entry_nonce={entry_nonce}")
+    print(f"{prefix}entry_order_id={entry_order_id}")
+    print(f"{prefix}entry_post_latency_ms={_elapsed_ms(entry_post_started_ns, entry_post_done_ns)}")
+    print(f"{prefix}entry_fill_confirmation=market_post_success_no_private_fill_ws")
+    print(f"{prefix}post_entry_position_check_skipped=True")
+
+    if not getattr(args, "prebuild_close_order", False):
+        close_sign_started_ns = _now_ns()
+        print(f"{prefix}close_sign_latency_ms={_elapsed_ms(close_sign_started_ns)}")
+        print(f"{prefix}close_sign_latency_source=sdk_internal_not_separately_measured")
+
+    print(f"{prefix}close_submitting=True")
+    print(f"{prefix}entry_to_close_submit_gap_ms={_elapsed_ms(entry_post_done_ns)}")
+    close_post_started_ns = _now_ns()
+    try:
+        close_nonce, close_order_id = client.place_market_order(
+            assignment.market,
+            str(quantity),
+            side_lookup[close_side_name],
+            args.max_fees_percent,
+            order_flags=OrderFlags.ReduceOnly,
+        )
+    except Exception as exc:
+        close_post_done_ns = _now_ns()
+        print(f"{prefix}close_post_latency_ms={_elapsed_ms(close_post_started_ns, close_post_done_ns)}")
+        print(f"{prefix}close_order_failed=True")
+        print(f"{prefix}close_error_type={exc.__class__.__name__}")
+        print(f"{prefix}manual_review_required=True")
+        print(f"{prefix}cycle_total_latency_ms={_elapsed_ms(cycle_started, close_post_done_ns)}")
+        return HibachiFastCloseResult(
+            False,
+            "close_order_failed",
+            estimated_gross,
+            entry_order_id=str(entry_order_id),
+        )
+
+    close_post_done_ns = _now_ns()
+    print(f"{prefix}close_submitted=True")
+    print(f"{prefix}close_nonce={close_nonce}")
+    print(f"{prefix}close_order_id={close_order_id}")
+    print(f"{prefix}close_post_latency_ms={_elapsed_ms(close_post_started_ns, close_post_done_ns)}")
+
+    final_state = _print_final_market_state(client, assignment.market, args, label_prefix=label_prefix)
+    print(f"{prefix}cycle_total_latency_ms={_elapsed_ms(cycle_started, close_post_done_ns)}")
+    status = "ok_flat" if final_state.final_all_flat else "fast_close_final_not_flat"
+    return HibachiFastCloseResult(
+        final_state.final_all_flat,
+        status,
+        estimated_gross,
+        entry_order_id=str(entry_order_id),
+        close_order_id=str(close_order_id),
+        final_open_order_count=final_state.final_open_order_count,
+        final_position_size=final_state.final_position_size,
+        final_all_flat=final_state.final_all_flat,
+    )
+
+
+def _opposite_side(side: Literal["BUY", "SELL"]) -> Literal["BUY", "SELL"]:
+    return "SELL" if side == "BUY" else "BUY"
+
+
+def _print_final_market_state(
+    client: object,
+    market: str,
+    args: argparse.Namespace,
+    *,
+    label_prefix: str = "",
+) -> HibachiFastCloseResult:
+    prefix = f"{label_prefix} " if label_prefix else ""
+    direction, quantity = _settled_position_state(client, market, args, label="final")
+    open_order_count = _open_order_count(client, market)
+    all_flat = quantity <= Decimal("0") and open_order_count == 0
+    print(f"{prefix}final_open_order_count={open_order_count if open_order_count is not None else 'unknown'}")
+    print(f"{prefix}final_position_direction={direction or 'flat'}")
+    print(f"{prefix}final_position_size={quantity}")
+    print(f"{prefix}final_position_steps=not_available_for_hibachi_sdk")
+    print(f"{prefix}final_all_flat={all_flat}")
+    return HibachiFastCloseResult(
+        all_flat,
+        "ok_flat" if all_flat else "final_not_flat",
+        Decimal("0"),
+        final_open_order_count=open_order_count,
+        final_position_size=quantity,
+        final_all_flat=all_flat,
+    )
+
+
+def _open_order_count(client: object, market: str) -> int | None:
+    try:
+        response = client.get_pending_orders()
+    except Exception as exc:
+        print(f"final_open_order_lookup_error={exc.__class__.__name__}")
+        return None
+    return sum(1 for order in getattr(response, "orders", ()) if getattr(order, "symbol", "") == market)
+
+
+def _now_ns() -> int:
+    return time.perf_counter_ns()
+
+
+def _elapsed_ms(start_ns: int, end_ns: int | None = None) -> str:
+    end = end_ns if end_ns is not None else _now_ns()
+    return f"{(end - start_ns) / 1_000_000:.3f}"
 
 
 def _print_actual_fill_spread(
