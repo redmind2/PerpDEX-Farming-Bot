@@ -4,6 +4,8 @@
 # Hotstuff's published SDK classifiers cover Python up to 3.13.
 hibachi-xyz==0.3.1
 hotstuff-python-sdk==0.1.1b4
+hyperliquid-python-sdk==0.24.0
+lighter-sdk==1.1.1
 eth-account>=0.13,<0.14
 websockets==16.0
 base58>=2.1.1,<3

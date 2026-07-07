@@ -95,8 +95,9 @@ class RisexAdapter:
         planned_gross_volume_usd: Decimal,
         first_side: str = "BUY",
         second_side: str = "SELL",
+        roundtrip_mode: str = "confirmed",
     ) -> PairedRoundtripResult:
-        del instrument_id, buy_price, sell_price, buy_size, sell_size, first_side, second_side
+        del instrument_id, buy_price, sell_price, buy_size, sell_size, first_side, second_side, roundtrip_mode
         if not self.allow_live_orders:
             raise AdapterError("RiseX live orders are disabled in the Phase 0 adapter skeleton")
         raise AdapterError("RiseX live order submission is not implemented yet")

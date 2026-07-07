@@ -1,0 +1,91 @@
+{
+  "environment": "production",
+  "dex": "",
+  "average_window": "5m",
+  "target_gross_volume_usd": "1000",
+  "max_leg_notional_usd": "100",
+  "book_fraction": "0.5",
+  "spread_cap_bps": "1",
+  "min_order_size_usd": "10",
+  "slippage_bps": "25",
+  "allow_live_orders": true,
+  "markets": [
+    {
+      "coin": "BRENTOIL",
+      "api_coin": "xyz:BRENTOIL",
+      "dex": "xyz",
+      "display_market": "BRENTOIL-PERP",
+      "average_spread_bps": "1.10"
+    },
+    {
+      "coin": "BTC",
+      "api_coin": "BTC",
+      "dex": "",
+      "display_market": "BTC-PERP",
+      "average_spread_bps": "0.16"
+    },
+    {
+      "coin": "ETH",
+      "api_coin": "ETH",
+      "dex": "",
+      "display_market": "ETH-PERP",
+      "average_spread_bps": "0.56"
+    },
+    {
+      "coin": "EWY",
+      "api_coin": "xyz:EWY",
+      "dex": "xyz",
+      "display_market": "EWY-PERP",
+      "average_spread_bps": "3.00"
+    },
+    {
+      "coin": "GOLD",
+      "api_coin": "xyz:GOLD",
+      "dex": "xyz",
+      "display_market": "GOLD-PERP",
+      "average_spread_bps": "0.24"
+    },
+    {
+      "coin": "HYPE",
+      "api_coin": "HYPE",
+      "dex": "",
+      "display_market": "HYPE-PERP",
+      "average_spread_bps": "0.32"
+    },
+    {
+      "coin": "SAMSUNG",
+      "api_coin": "xyz:SMSN",
+      "dex": "xyz",
+      "display_market": "SAMSUNG-PERP",
+      "average_spread_bps": "2.19"
+    },
+    {
+      "coin": "SILVER",
+      "api_coin": "xyz:SILVER",
+      "dex": "xyz",
+      "display_market": "SILVER-PERP",
+      "average_spread_bps": "0.20"
+    },
+    {
+      "coin": "SKHYNICS",
+      "api_coin": "xyz:SKHX",
+      "dex": "xyz",
+      "display_market": "SKHYNICS-PERP",
+      "average_spread_bps": "1.72"
+    },
+    {
+      "coin": "SOL",
+      "api_coin": "SOL",
+      "dex": "",
+      "display_market": "SOL-PERP",
+      "average_spread_bps": "0.12"
+    },
+    {
+      "coin": "WTIOIL",
+      "api_coin": "xyz:CL",
+      "dex": "xyz",
+      "display_market": "WTIOIL-PERP",
+      "average_spread_bps": null
+    }
+  ]
+}

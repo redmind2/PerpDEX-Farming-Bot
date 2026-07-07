@@ -159,6 +159,7 @@ def main() -> None:
     print(f"loop_delay_seconds={args.loop_delay_seconds}")
     print(f"fast_close_on_fill={args.fast_close_on_fill}")
     print(f"prebuild_close_order={args.prebuild_close_order}")
+    print(f"roundtrip_mode={'fast-reduce-only' if args.fast_close_on_fill else 'netting'}")
     print(f"monitor_source={args.monitor_source}")
     print(f"monitor_cache_max_age_seconds={args.monitor_cache_max_age_seconds}")
     print(f"websocket_snapshot_timeout_seconds={args.websocket_snapshot_timeout_seconds}")
@@ -702,6 +703,7 @@ def _execute_live_loop(
             buy_size=buy_qty,
             sell_size=sell_qty,
             planned_gross_volume_usd=planned_gross,
+            roundtrip_mode="netting",
             reason="lowest_expected_loss_eligible_market",
         )
 

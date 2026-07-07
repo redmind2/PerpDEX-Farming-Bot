@@ -91,11 +91,12 @@ class HotstuffAdapter:
         planned_gross_volume_usd: Decimal,
         first_side: str = "BUY",
         second_side: str = "SELL",
+        roundtrip_mode: str = "confirmed",
     ) -> PairedRoundtripResult:
         ensure_hotstuff_sdk_compat()
         from hotstuff import PlaceOrderParams, UnitOrder
 
-        del first_side, second_side
+        del first_side, second_side, roundtrip_mode
         client = self._exchange_client()
         orders = [
             UnitOrder(

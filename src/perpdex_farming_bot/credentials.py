@@ -18,6 +18,10 @@ RISEX_PRIVATE_READONLY_FIELDS = ("ACCOUNT_ADDRESS",)
 RISEX_SIGNING_FIELDS = ("SIGNER_ADDRESS", "SIGNER_PRIVATE_KEY")
 PACIFICA_PRIVATE_READONLY_FIELDS = ("ACCOUNT_ADDRESS",)
 PACIFICA_SIGNING_FIELDS = ("API_AGENT_PUBLIC_KEY", "API_AGENT_PRIVATE_KEY")
+HYPERLIQUID_PRIVATE_READONLY_FIELDS = ("ACCOUNT_ADDRESS",)
+HYPERLIQUID_SIGNING_FIELDS = ("API_WALLET_ADDRESS", "API_WALLET_PRIVATE_KEY")
+LIGHTER_PRIVATE_READONLY_FIELDS = ("L1_ADDRESS", "ACCOUNT_INDEX", "READ_ONLY_AUTH_TOKEN")
+LIGHTER_SIGNING_FIELDS = ("ACCOUNT_INDEX", "API_KEY_INDEX", "API_PRIVATE_KEY")
 
 
 @dataclass(frozen=True)
@@ -289,6 +293,173 @@ def read_pacifica_credentials(prefix: str, environment: str = "TESTNET") -> dict
 
 
 def _pacifica_credential_environment(environment: str) -> str:
+    normalized = normalize_env_prefix(environment)
+    if normalized in {"MAINNET", "PROD", "PRODUCTION"}:
+        return "PRODUCTION"
+    if normalized in {"TEST", "TESTNET"}:
+        return "TESTNET"
+    return normalized
+
+
+@dataclass(frozen=True)
+class HyperliquidCredentialEnv:
+    prefix: str
+    environment: str
+    account_address: str
+    api_wallet_address: str
+    api_wallet_private_key: str
+    vault_address: str
+
+    @property
+    def private_readonly_names(self) -> tuple[str, ...]:
+        return (self.account_address,)
+
+    @property
+    def signing_names(self) -> tuple[str, ...]:
+        return (self.api_wallet_address, self.api_wallet_private_key)
+
+
+def hyperliquid_credential_env(prefix: str, environment: str = "PRODUCTION") -> HyperliquidCredentialEnv:
+    canonical = normalize_env_prefix(prefix)
+    env = _hyperliquid_credential_environment(environment)
+    return HyperliquidCredentialEnv(
+        prefix=canonical,
+        environment=env,
+        account_address=env_name(canonical, "ACCOUNT_ADDRESS", env),
+        api_wallet_address=env_name(canonical, "API_WALLET_ADDRESS", env),
+        api_wallet_private_key=env_name(canonical, "API_WALLET_PRIVATE_KEY", env),
+        vault_address=env_name(canonical, "VAULT_ADDRESS", env),
+    )
+
+
+def hyperliquid_available_private_readonly_env(
+    prefix: str,
+    environment: str = "PRODUCTION",
+) -> HyperliquidCredentialEnv | None:
+    candidate = hyperliquid_credential_env(prefix, environment)
+    if all(masked_env_status(name) != "missing" for name in candidate.private_readonly_names):
+        return candidate
+    return None
+
+
+def hyperliquid_private_readonly_missing(prefix: str, environment: str = "PRODUCTION") -> list[str]:
+    names = hyperliquid_credential_env(prefix, environment).private_readonly_names
+    return [name for name in names if masked_env_status(name) == "missing"]
+
+
+def hyperliquid_signing_missing(prefix: str, environment: str = "PRODUCTION") -> list[str]:
+    names = hyperliquid_credential_env(prefix, environment)
+    return [name for name in names.signing_names if masked_env_status(name) == "missing"]
+
+
+def read_hyperliquid_private_readonly_params(prefix: str, environment: str = "PRODUCTION") -> dict[str, str]:
+    names = hyperliquid_available_private_readonly_env(prefix, environment) or hyperliquid_credential_env(
+        prefix,
+        environment,
+    )
+    return {
+        "user": get_env(names.account_address),
+        "vault_address": get_env(names.vault_address),
+    }
+
+
+def read_hyperliquid_credentials(prefix: str, environment: str = "PRODUCTION") -> dict[str, str]:
+    names = hyperliquid_credential_env(prefix, environment)
+    return {
+        "account_address": get_env(names.account_address),
+        "api_wallet_address": get_env(names.api_wallet_address),
+        "api_wallet_private_key": get_env(names.api_wallet_private_key),
+        "vault_address": get_env(names.vault_address),
+    }
+
+
+def _hyperliquid_credential_environment(environment: str) -> str:
+    normalized = normalize_env_prefix(environment)
+    if normalized in {"MAINNET", "PROD", "PRODUCTION"}:
+        return "PRODUCTION"
+    if normalized in {"TEST", "TESTNET"}:
+        return "TESTNET"
+    return normalized
+
+
+@dataclass(frozen=True)
+class LighterCredentialEnv:
+    prefix: str
+    environment: str
+    l1_address: str
+    account_index: str
+    api_key_index: str
+    api_private_key: str
+    read_only_auth_token: str
+
+    @property
+    def private_readonly_names(self) -> tuple[str, ...]:
+        return (self.l1_address, self.account_index, self.read_only_auth_token)
+
+    @property
+    def signing_names(self) -> tuple[str, ...]:
+        return (self.account_index, self.api_key_index, self.api_private_key)
+
+
+def lighter_credential_env(prefix: str, environment: str = "PRODUCTION") -> LighterCredentialEnv:
+    canonical = normalize_env_prefix(prefix)
+    env = _lighter_credential_environment(environment)
+    return LighterCredentialEnv(
+        prefix=canonical,
+        environment=env,
+        l1_address=env_name(canonical, "L1_ADDRESS", env),
+        account_index=env_name(canonical, "ACCOUNT_INDEX", env),
+        api_key_index=env_name(canonical, "API_KEY_INDEX", env),
+        api_private_key=env_name(canonical, "API_PRIVATE_KEY", env),
+        read_only_auth_token=env_name(canonical, "READ_ONLY_AUTH_TOKEN", env),
+    )
+
+
+def lighter_available_private_readonly_env(
+    prefix: str,
+    environment: str = "PRODUCTION",
+) -> LighterCredentialEnv | None:
+    candidate = lighter_credential_env(prefix, environment)
+    if masked_env_status(candidate.account_index) != "missing":
+        return candidate
+    if masked_env_status(candidate.l1_address) != "missing":
+        return candidate
+    return None
+
+
+def lighter_private_readonly_missing(prefix: str, environment: str = "PRODUCTION") -> list[str]:
+    names = lighter_credential_env(prefix, environment)
+    if lighter_available_private_readonly_env(prefix, environment) is not None:
+        return []
+    return [names.account_index, names.l1_address]
+
+
+def lighter_signing_missing(prefix: str, environment: str = "PRODUCTION") -> list[str]:
+    names = lighter_credential_env(prefix, environment)
+    return [name for name in names.signing_names if masked_env_status(name) == "missing"]
+
+
+def read_lighter_private_readonly_params(prefix: str, environment: str = "PRODUCTION") -> dict[str, str]:
+    names = lighter_available_private_readonly_env(prefix, environment) or lighter_credential_env(prefix, environment)
+    return {
+        "l1_address": get_env(names.l1_address),
+        "account_index": get_env(names.account_index),
+        "read_only_auth_token": get_env(names.read_only_auth_token),
+    }
+
+
+def read_lighter_credentials(prefix: str, environment: str = "PRODUCTION") -> dict[str, str]:
+    names = lighter_credential_env(prefix, environment)
+    return {
+        "l1_address": get_env(names.l1_address),
+        "account_index": get_env(names.account_index),
+        "api_key_index": get_env(names.api_key_index),
+        "api_private_key": get_env(names.api_private_key),
+        "read_only_auth_token": get_env(names.read_only_auth_token),
+    }
+
+
+def _lighter_credential_environment(environment: str) -> str:
     normalized = normalize_env_prefix(environment)
     if normalized in {"MAINNET", "PROD", "PRODUCTION"}:
         return "PRODUCTION"

@@ -146,12 +146,19 @@ def main() -> None:
     parser.add_argument(
         "--prebuild-close-order",
         action="store_true",
-        help="Pre-sign the reduce-only close before entry submission. Requires --fast-close-on-fill.",
+        help="Pre-sign the second-side order before entry submission. Requires a fast close mode.",
+    )
+    parser.add_argument(
+        "--close-mode",
+        choices=("confirmed", "fast-reduce-only", "netting"),
+        default=None,
+        help="confirmed waits for a position check; fast-reduce-only submits reduce-only close after entry; netting submits the opposite non-reduce-only order after entry.",
     )
     parser.add_argument("--network", action="store_true")
     parser.add_argument("--execute-live", action="store_true")
     parser.add_argument("--confirm", default="")
     args = parser.parse_args()
+    _normalize_close_mode_args(args)
 
     plan = json.loads(Path(args.config).read_text(encoding="utf-8"))
     environment = normalize_pacifica_environment(args.environment or str(plan.get("environment", "production")))
@@ -180,6 +187,9 @@ def main() -> None:
     print(f"loop_delay_seconds={args.loop_delay_seconds}")
     print(f"fast_close_on_fill={args.fast_close_on_fill}")
     print(f"prebuild_close_order={args.prebuild_close_order}")
+    print(f"close_mode={args.close_mode}")
+    close_order_type = "market_ask" if args.close_mode == "netting" else "market_reduce_only_ask"
+    print(f"close_order_type={close_order_type}")
     print("target_volume_accounting=planned_entry_notional_plus_planned_close_notional")
     print("order_sizing_rule=min(order_notional_usd, remaining_gross_volume_usd/2, smaller_best_bid_or_ask_level_notional*level_size_fraction)")
     print("fresh_orderbook_verify=selected_market_only_before_order")
@@ -289,14 +299,14 @@ def main() -> None:
         return
     _print_signed_request_summary("dry_run_entry", signed_entry)
     dry_close_ready = False
-    if args.fast_close_on_fill and args.prebuild_close_order:
+    if args.close_mode in {"fast-reduce-only", "netting"} and args.prebuild_close_order:
         sign_close_started_ns = _now_ns()
         signed_dry_close = _build_signed_market_order(
             adapter=dry_adapter,
             symbol=candidate.config.symbol,
             amount=candidate.amount,
             side="ask",
-            reduce_only=True,
+            reduce_only=args.close_mode != "netting",
             slippage_percent=args.slippage_percent,
             expiry_window_ms=args.expiry_window_ms,
         )
@@ -485,14 +495,14 @@ def _run_live_loop(
             break
 
         prebuilt_close: object | None = None
-        if args.fast_close_on_fill and args.prebuild_close_order:
+        if args.close_mode in {"fast-reduce-only", "netting"} and args.prebuild_close_order:
             sign_close_started_ns = _now_ns()
             prebuilt_close = _build_signed_market_order(
                 adapter=dry_adapter,
                 symbol=fresh.config.symbol,
                 amount=fresh.amount,
                 side="ask",
-                reduce_only=True,
+                reduce_only=args.close_mode != "netting",
                 slippage_percent=args.slippage_percent,
                 expiry_window_ms=args.expiry_window_ms,
             )
@@ -541,10 +551,12 @@ def _run_live_loop(
         if entry_order_id:
             print(f"entry_order_id={entry_order_id}")
 
-        if args.fast_close_on_fill:
+        if args.close_mode in {"fast-reduce-only", "netting"}:
             print("fast_close_on_fill=True")
+            print(f"close_mode={args.close_mode}")
             print("post_entry_position_check_skipped=True")
-            print("close_quantity_source=planned_entry_amount_reduce_only_fast")
+            close_source = "planned_entry_amount_netting" if args.close_mode == "netting" else "planned_entry_amount_reduce_only_fast"
+            print(f"close_quantity_source={close_source}")
             close_amount = fresh.amount
             close_side = "ask"
             close_amount_abs = fresh.amount
@@ -558,7 +570,7 @@ def _run_live_loop(
                     symbol=fresh.config.symbol,
                     amount=close_amount_abs,
                     side=close_side,
-                    reduce_only=True,
+                    reduce_only=args.close_mode != "netting",
                     slippage_percent=args.slippage_percent,
                     expiry_window_ms=args.expiry_window_ms,
                 )
@@ -646,6 +658,69 @@ def _run_live_loop(
             time.sleep(args.post_order_wait_seconds)
         final_amount = _settled_position_amount(api_endpoint, account, fresh.config.symbol, args, label="final")
         print(f"final_position_amount={fmt_decimal(final_amount)}")
+        if final_amount != 0 and args.close_mode == "netting":
+            print("netting_residual_position_detected=True")
+            rescue_side = "ask" if final_amount > 0 else "bid"
+            rescue_amount_abs = abs(final_amount)
+            sign_rescue_started_ns = _now_ns()
+            signed_rescue = _build_signed_market_order(
+                adapter=dry_adapter,
+                symbol=fresh.config.symbol,
+                amount=rescue_amount_abs,
+                side=rescue_side,
+                reduce_only=True,
+                slippage_percent=args.slippage_percent,
+                expiry_window_ms=args.expiry_window_ms,
+            )
+            print(f"cycle_{cycle}_rescue_close_sign_latency_ms={_elapsed_ms(sign_rescue_started_ns)}")
+            if signed_rescue is None:
+                print("stop_reason=netting_rescue_signing_failed_manual_review_required")
+                _print_ledger_error_event(
+                    f"cycle_{cycle}",
+                    run_mode="live",
+                    status="manual_review_required",
+                    reason="netting_rescue_signing_failed",
+                    candidate=fresh,
+                )
+                break
+            rescue_post_started_ns = _now_ns()
+            try:
+                rescue_result = live_adapter.submit_signed_order_request(signed_rescue)
+            except AdapterError as exc:
+                print("stop_reason=adapter_rejected_netting_rescue_order")
+                print(f"adapter_error={exc}")
+                _print_ledger_error_event(
+                    f"cycle_{cycle}",
+                    run_mode="live",
+                    status="manual_review_required",
+                    reason="adapter_rejected_netting_rescue_order",
+                    candidate=fresh,
+                )
+                break
+            rescue_post_done_ns = _now_ns()
+            print(f"cycle_{cycle}_rescue_close_post_latency_ms={_elapsed_ms(rescue_post_started_ns, rescue_post_done_ns)}")
+            _print_post_result("netting_rescue_close", rescue_result)
+            if not rescue_result.ok:
+                print("stop_reason=netting_rescue_order_failed_manual_review_required")
+                _print_ledger_error_event(
+                    f"cycle_{cycle}",
+                    run_mode="live",
+                    status="manual_review_required",
+                    reason="netting_rescue_order_failed",
+                    candidate=fresh,
+                )
+                break
+            close_post_done_ns = rescue_post_done_ns
+            if args.post_order_wait_seconds:
+                time.sleep(args.post_order_wait_seconds)
+            final_amount = _settled_position_amount(
+                api_endpoint,
+                account,
+                fresh.config.symbol,
+                args,
+                label="final_after_netting_rescue",
+            )
+            print(f"final_position_amount_after_netting_rescue={fmt_decimal(final_amount)}")
         if final_amount != 0:
             print("stop_reason=position_remains_manual_review_required")
             _print_ledger_error_event(
@@ -796,8 +871,15 @@ def _validate_args(
         raise SystemExit("--position-settle-attempts must be greater than zero")
     if args.position_settle_delay_seconds < 0:
         raise SystemExit("--position-settle-delay-seconds must be zero or greater")
-    if args.prebuild_close_order and not args.fast_close_on_fill:
-        raise SystemExit("--prebuild-close-order requires --fast-close-on-fill")
+    if args.prebuild_close_order and args.close_mode == "confirmed":
+        raise SystemExit("--prebuild-close-order requires --fast-close-on-fill or --close-mode netting")
+
+
+def _normalize_close_mode_args(args: argparse.Namespace) -> None:
+    if args.close_mode is None:
+        args.close_mode = "fast-reduce-only" if args.fast_close_on_fill else "confirmed"
+    if args.close_mode in {"fast-reduce-only", "netting"}:
+        args.fast_close_on_fill = True
 
 
 def _dependencies_ready() -> bool:

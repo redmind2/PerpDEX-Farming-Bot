@@ -205,6 +205,7 @@ def main() -> None:
     print("hibachi_signing_mode=sdk_internal_at_post")
     print(f"entry_mode={args.entry_mode}")
     print(f"close_mode={args.close_mode}")
+    print(f"roundtrip_mode={'netting' if args.entry_mode == 'paired-market-batch' else args.close_mode}")
 
     if not snapshot_result.ok or snapshot_result.snapshot is None:
         print("preflight_ok=False")

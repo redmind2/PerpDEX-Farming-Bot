@@ -1,0 +1,21 @@
+{
+  "environment": "production",
+  "dex": "",
+  "average_window": "5m",
+  "target_gross_volume_usd": "20",
+  "max_leg_notional_usd": "10",
+  "book_fraction": "0.5",
+  "spread_cap_bps": "2",
+  "min_order_size_usd": "10",
+  "slippage_bps": "25",
+  "allow_live_orders": true,
+  "markets": [
+    {
+      "coin": "BTC",
+      "api_coin": "BTC",
+      "dex": "",
+      "display_market": "BTC-PERP",
+      "average_spread_bps": "2"
+    }
+  ]
+}

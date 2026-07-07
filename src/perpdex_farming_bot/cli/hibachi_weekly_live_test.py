@@ -1263,6 +1263,7 @@ def _run_live_phase(
                         planned_gross_volume_usd=round_plan.notional_usd * Decimal("2"),
                         first_side=round_plan.first_side,
                         second_side=round_plan.second_side,
+                        roundtrip_mode="netting",
                         reason="hibachi_weekly_lowest_live_spread",
                     ),
                 )

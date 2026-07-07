@@ -63,6 +63,7 @@ class ExchangeAdapter(Protocol):
         planned_gross_volume_usd: Decimal,
         first_side: str = "BUY",
         second_side: str = "SELL",
+        roundtrip_mode: str = "confirmed",
     ) -> PairedRoundtripResult:
         """Place one paired buy/sell roundtrip through the exchange-specific API."""
 

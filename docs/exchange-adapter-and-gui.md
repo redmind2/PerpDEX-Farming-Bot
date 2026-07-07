@@ -30,6 +30,8 @@ Current adapter files:
 - `src/perpdex_farming_bot/exchanges/hibachi.py`
 - `src/perpdex_farming_bot/exchanges/risex.py`
 - `src/perpdex_farming_bot/exchanges/pacifica.py`
+- `src/perpdex_farming_bot/exchanges/hyperliquid.py`
+- `src/perpdex_farming_bot/exchanges/lighter.py`
 
 The core runner lives at:
 
@@ -551,3 +553,122 @@ Telegram remains a secondary remote:
 - health
 
 Telegram must not start live trading directly.
+
+## Hyperliquid Adapter
+
+Hyperliquid is added as a separated read-only, dry-run preflight, guarded tiny
+BTC live-test path, and guarded spread-volume path through the shared
+live-volume core:
+
+- env check: `src/perpdex_farming_bot/cli/check_hyperliquid_env.py`
+- read-only smoke: `src/perpdex_farming_bot/cli/hyperliquid_readonly_smoke.py`
+- live preflight with no orders: `src/perpdex_farming_bot/cli/hyperliquid_live_preflight.py`
+- guarded tiny BTC live-test CLI: `src/perpdex_farming_bot/cli/hyperliquid_live_test.py`
+- guarded spread-gated volume CLI: `src/perpdex_farming_bot/cli/hyperliquid_live_volume_test.py`
+- configured market draft: `config/hyperliquid.live-volume.json`
+- configured spread-volume test: `config/hyperliquid.spread-volume-test.json`
+- REST `/info` connector: `src/perpdex_farming_bot/connectors/hyperliquid_readonly.py`
+- unsigned close-request preview helper: `src/perpdex_farming_bot/connectors/hyperliquid_trading.py`
+- market data skeleton: `src/perpdex_farming_bot/marketdata/hyperliquid.py`
+- adapter and guarded order submitter: `src/perpdex_farming_bot/exchanges/hyperliquid.py`
+- fee provider: `src/perpdex_farming_bot/exchanges/hyperliquid_fees.py`
+
+The Hyperliquid adapter can list positions through private read-only
+`clearinghouseState`, check open orders, verify signer env presence without
+printing secrets, and execute a paired IOC roundtrip only when
+`allow_live_orders=True`. Entry orders are normal IOC orders. Close orders are
+reduce-only IOC orders sized from the actual entry fill.
+
+`hyperliquid_live_test` remains the one capped BTC path. The measured-volume
+path now flows through the common runner:
+
+```text
+hyperliquid_live_volume_test -> core.live_volume.run_paired_volume -> HyperliquidAdapter
+```
+
+`hyperliquid_live_volume_test` checks current spread against
+`min(1 bps, configured average spread)`, sizes each leg by top-of-book 50% or
+`$100`, closes immediately reduce-only through the adapter, waits one second
+through the common core delay, then rescans.
+
+For Hyperliquid HIP-3 commodity/equity-style markets, config must distinguish
+display names from API coin names. For example `SAMSUNG-PERP` maps to
+`api_coin=xyz:SMSN` with `dex=xyz`, and `SKHYNICS-PERP` maps to
+`api_coin=xyz:SKHX` with `dex=xyz`; `WTIOIL-PERP` maps to `api_coin=xyz:CL`
+with `dex=xyz`. The live-volume CLI initializes the SDK with every configured
+perp dex before any dry-run or live check.
+
+Hyperliquid fee priority is:
+
+```text
+official SDK or /info userFees
+-> market metadata if usable fee fields appear
+-> exact config override
+-> fee_unknown block
+```
+
+For current market-style entry and close planning, the provider uses taker fee
+for both entry and exit. It records maker fee from `userFees`, but maker fee may
+be used only by a future order path that guarantees maker execution.
+
+Hyperliquid market precision comes from `meta`:
+
+```text
+size lot = 10 ^ -szDecimals
+perp price decimals <= 6 - szDecimals, plus the 5 significant figures rule
+```
+
+`config/hyperliquid.live-volume.json` sets `min_order_size_usd` to `10` for the
+first mainnet draft, matching the official exchange endpoint example error that
+orders below `$10` are rejected. If Hyperliquid changes this rule, update local
+config before enabling any future live path.
+
+Fast close prebuild remains a review-only option. `--fast-close-on-fill
+--prebuild-close-order` reports the required close path, but no pre-signed close
+request is produced. The guarded live paths sign the reduce-only close only
+after the entry fill and use the actual filled size, followed by open-order and
+final-position reconciliation.
+
+## Lighter Phase 0
+
+Lighter is added as a separated Phase 0 read-only skeleton:
+
+- env check: `src/perpdex_farming_bot/cli/check_lighter_env.py`
+- read-only smoke: `src/perpdex_farming_bot/cli/lighter_readonly_smoke.py`
+- REST connector: `src/perpdex_farming_bot/connectors/lighter_readonly.py`
+- market data helper: `src/perpdex_farming_bot/marketdata/lighter.py`
+- adapter skeleton: `src/perpdex_farming_bot/exchanges/lighter.py`
+- fee provider skeleton: `src/perpdex_farming_bot/exchanges/lighter_fees.py`
+- onboarding notes: `docs/lighter-onboarding.md`
+
+The Lighter adapter can read account snapshots/positions through
+`GET /api/v1/account` and can read open orders only when a read-only auth token
+is present. Live order, cancel, transfer, withdrawal, and reduce-only close
+paths intentionally raise `AdapterError` in Phase 0.
+
+Official docs confirm production REST at:
+
+```text
+https://mainnet.zklighter.elliot.ai
+```
+
+They also confirm WebSocket endpoints:
+
+```text
+wss://mainnet.zklighter.elliot.ai/stream
+wss://testnet.zklighter.elliot.ai/stream
+```
+
+The testnet REST base URL is intentionally not defaulted until an official
+source confirms it.
+
+Lighter fee priority is:
+
+```text
+orderBooks market metadata taker fee percentage
+-> exact config override
+-> fee_unknown block
+```
+
+For future market-style entry and close planning, the provider uses taker fee
+for both entry and exit. The fee is never assumed to be zero.

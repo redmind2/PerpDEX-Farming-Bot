@@ -19,6 +19,7 @@ class RoundtripPlan:
     planned_gross_volume_usd: Decimal
     first_side: str = "BUY"
     second_side: str = "SELL"
+    roundtrip_mode: str = "confirmed"
     reason: str = "selected"
 
 
@@ -94,7 +95,9 @@ def run_paired_volume(
             f"planned_gross_volume_usd={plan.planned_gross_volume_usd:.4f}"
         )
         emit(f"cycle={cycle} live_submit=True")
+        submit_started = time.perf_counter()
         result = execute_roundtrip_plan(adapter, plan)
+        emit(f"cycle={cycle} adapter_submit_elapsed_ms={(time.perf_counter() - submit_started) * 1000:.2f}")
         results.append(result)
         emit(f"cycle={cycle} adapter_status={result.status}")
         if not result.success:
@@ -125,4 +128,5 @@ def execute_roundtrip_plan(adapter: ExchangeAdapter, plan: RoundtripPlan) -> Pai
         planned_gross_volume_usd=plan.planned_gross_volume_usd,
         first_side=plan.first_side,
         second_side=plan.second_side,
+        roundtrip_mode=plan.roundtrip_mode,
     )

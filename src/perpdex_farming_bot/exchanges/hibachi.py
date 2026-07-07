@@ -49,8 +49,9 @@ class HibachiAdapter:
         planned_gross_volume_usd: Decimal,
         first_side: str = "BUY",
         second_side: str = "SELL",
+        roundtrip_mode: str = "confirmed",
     ) -> PairedRoundtripResult:
-        del instrument_id, buy_price, sell_price
+        del instrument_id, buy_price, sell_price, roundtrip_mode
         if buy_size != sell_size:
             return PairedRoundtripResult(
                 self.exchange_id,

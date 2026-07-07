@@ -16,6 +16,8 @@ Current SDK policy:
 
 - Hibachi live/read-only SDK: `hibachi-xyz==0.3.1`
 - Hotstuff live order SDK: `hotstuff-python-sdk==0.1.1b4`
+- Hyperliquid official SDK: `hyperliquid-python-sdk==0.24.0`
+- Lighter official SDK: `lighter-sdk==1.1.1`
 - RiseX SDK note: official docs point to `risex-client`, an unofficial
   community TypeScript SDK. This Python repo uses direct read-only REST and
   WebSocket skeletons first.
@@ -82,6 +84,8 @@ $env:PYTHONPATH="src"
 python -m compileall src
 python -m perpdex_farming_bot.cli.check_hibachi_env
 python -m perpdex_farming_bot.cli.check_hotstuff_env
+python -m perpdex_farming_bot.cli.check_hyperliquid_env --environment production
+python -m perpdex_farming_bot.cli.check_lighter_env --environment production
 python -m perpdex_farming_bot.cli.check_risex_env --environment testnet
 python -m perpdex_farming_bot.cli.check_pacifica_env --environment testnet
 ```
@@ -92,6 +96,10 @@ Read-only network checks:
 $env:PYTHONPATH="src"
 python -m perpdex_farming_bot.cli.hibachi_sdk_smoke --network --public --symbol BTC/USDT-P
 python -m perpdex_farming_bot.cli.hotstuff_readonly_smoke --environment production --network
+python -m perpdex_farming_bot.cli.hyperliquid_readonly_smoke --environment production --network --public --public-check meta
+python -m perpdex_farming_bot.cli.hyperliquid_readonly_smoke --environment production --network --public --public-check l2-book --coin BTC
+python -m perpdex_farming_bot.cli.lighter_readonly_smoke --environment production --network --public --public-check markets
+python -m perpdex_farming_bot.cli.lighter_readonly_smoke --environment production --network --public --public-check orderbook --market-id 0 --limit 5
 python -m perpdex_farming_bot.cli.risex_readonly_smoke --environment testnet --network --public --public-check markets
 python -m perpdex_farming_bot.cli.risex_readonly_smoke --environment testnet --network --public --public-check orderbook --market-id 1
 python -m perpdex_farming_bot.cli.pacifica_readonly_smoke --environment testnet --network --public --public-check markets
@@ -115,9 +123,34 @@ python -m perpdex_farming_bot.cli.risex_live_preflight --environment production 
 python -m perpdex_farming_bot.cli.risex_live_volume --environment production --network --market-ids 1,2,4,5 --target-gross-volume-usd 20 --max-leg-notional-usd 10 --spread-bps 1 --book-fraction 0.5 --fast-close-on-fill --prebuild-close-order
 ```
 
+Hyperliquid guarded dry-run preparation, no live order:
+
+```powershell
+$env:PYTHONPATH="src"
+python -m perpdex_farming_bot.cli.hyperliquid_live_preflight --environment production --network --config config/hyperliquid.live-volume.json
+python -m perpdex_farming_bot.cli.hyperliquid_live_preflight --environment production --network --fast-close-on-fill --prebuild-close-order
+python -m perpdex_farming_bot.cli.hyperliquid_live_test --network --coin BTC
+```
+
 The RiseX volume dry-run emits `execution_event_json={...}` for future
-Telegram/GUI/SQLite readers. Do not add `--execute-live` unless the operator has
-explicitly approved a tiny live test in the current session.
+Telegram/GUI/SQLite readers. Do not add `--execute-live` to any guarded live
+test unless the operator has explicitly approved that tiny live test in the
+current session.
+
+Hyperliquid's tiny live BTC roundtrip uses this separate confirmation string:
+
+```powershell
+$env:PYTHONPATH="src"
+python -m perpdex_farming_bot.cli.hyperliquid_live_test --network --coin BTC --execute-live --confirm LIVE_HYPERLIQUID_TINY_BTC_ROUNDTRIP
+```
+
+Hyperliquid's spread-gated `$1000` gross-volume test uses this separate
+confirmation string:
+
+```powershell
+$env:PYTHONPATH="src"
+python -m perpdex_farming_bot.cli.hyperliquid_live_volume_test --config config/hyperliquid.spread-volume-test.json --network --execute-live --confirm LIVE_HYPERLIQUID_1000_SPREAD_VOLUME
+```
 
 Only after env, public read-only, private read-only, paper-only, and dry-run are
 clean should live trading be enabled with the explicit CLI confirmation string.

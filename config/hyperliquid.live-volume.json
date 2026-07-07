@@ -1,0 +1,48 @@
+{
+  "environment": "production",
+  "dex": "",
+  "unknown_fee_policy": "block",
+  "target_gross_volume_usd": "24",
+  "max_leg_notional_usd": "15",
+  "level_size_fraction": "0.5",
+  "max_spread_bps": "2",
+  "allow_live_orders": true,
+  "markets": [
+    {
+      "coin": "BTC",
+      "display_market": "BTC-PERP",
+      "average_spread_bps": "2",
+      "max_spread_bps": "3",
+      "min_order_size_usd": "10",
+      "fee_multiplier": "1",
+      "slippage_buffer_bps": "0.5"
+    },
+    {
+      "coin": "ETH",
+      "display_market": "ETH-PERP",
+      "average_spread_bps": "2",
+      "max_spread_bps": "3",
+      "min_order_size_usd": "10",
+      "fee_multiplier": "1",
+      "slippage_buffer_bps": "0.5"
+    },
+    {
+      "coin": "SOL",
+      "display_market": "SOL-PERP",
+      "average_spread_bps": "3",
+      "max_spread_bps": "5",
+      "min_order_size_usd": "10",
+      "fee_multiplier": "1",
+      "slippage_buffer_bps": "0.5"
+    },
+    {
+      "coin": "HYPE",
+      "display_market": "HYPE-PERP",
+      "average_spread_bps": "3",
+      "max_spread_bps": "5",
+      "min_order_size_usd": "10",
+      "fee_multiplier": "1",
+      "slippage_buffer_bps": "0.5"
+    }
+  ]
+}

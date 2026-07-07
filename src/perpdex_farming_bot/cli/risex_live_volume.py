@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from decimal import Decimal, ROUND_FLOOR
 from types import SimpleNamespace
@@ -23,6 +24,7 @@ from perpdex_farming_bot.cli.risex_live_test import (
     _print_post_result,
     _read_only_state_is_ready,
     _settled_position_steps,
+    _size_to_steps,
 )
 from perpdex_farming_bot.connectors.risex_readonly import (
     RisexReadonlyConfigError,
@@ -35,6 +37,7 @@ from perpdex_farming_bot.connectors.risex_readonly import (
     validate_https_base_url,
 )
 from perpdex_farming_bot.connectors.risex_trading import (
+    RisexPostResult,
     RisexSignedPlaceOrder,
     RisexTradingConfigError,
     build_place_order_draft,
@@ -104,6 +107,14 @@ class MarketStateSummary:
     all_flat: bool
 
 
+@dataclass(frozen=True)
+class TimedRisexPost:
+    result: RisexPostResult | None
+    started_ns: int
+    done_ns: int
+    error: str = ""
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description=(
@@ -116,6 +127,7 @@ def main() -> None:
     parser.add_argument("--market-ids", default="1,2,4,5", help="Comma-separated RiseX market IDs.")
     parser.add_argument("--target-gross-volume-usd", type=Decimal, default=Decimal("1000"))
     parser.add_argument("--max-leg-notional-usd", type=Decimal, default=Decimal("100"))
+    parser.add_argument("--max-cycles", type=int, default=20)
     parser.add_argument("--spread-bps", type=Decimal, default=Decimal("1"))
     parser.add_argument("--max-expected-loss-bps", type=Decimal, default=None)
     parser.add_argument("--book-fraction", type=Decimal, default=Decimal("0.5"))
@@ -134,12 +146,19 @@ def main() -> None:
     parser.add_argument(
         "--prebuild-close-order",
         action="store_true",
-        help="Pre-sign the reduce-only close before entry submission. Requires --fast-close-on-fill.",
+        help="Pre-sign the second-side order before entry submission. Requires a fast close mode.",
+    )
+    parser.add_argument(
+        "--close-mode",
+        choices=("confirmed", "fast-reduce-only", "netting"),
+        default=None,
+        help="confirmed waits for a position check; fast-reduce-only submits reduce-only close after entry; netting submits the opposite non-reduce-only order after entry.",
     )
     parser.add_argument("--network", action="store_true")
     parser.add_argument("--execute-live", action="store_true")
     parser.add_argument("--confirm", default="")
     args = parser.parse_args()
+    _normalize_close_mode_args(args)
 
     _validate_args(args)
 
@@ -157,6 +176,7 @@ def main() -> None:
     print(f"market_ids={','.join(str(item) for item in market_ids)}")
     print(f"target_gross_volume_usd={fmt_decimal(args.target_gross_volume_usd)}")
     print(f"max_leg_notional_usd={fmt_decimal(args.max_leg_notional_usd)}")
+    print(f"max_cycles={args.max_cycles}")
     print(f"spread_bps_threshold={fmt_decimal(args.spread_bps)}")
     print(f"max_expected_loss_bps={fmt_decimal(args.max_expected_loss_bps) if args.max_expected_loss_bps is not None else 'none'}")
     print(f"fee_config={args.fee_config}")
@@ -165,11 +185,13 @@ def main() -> None:
     print(f"loop_delay_seconds={args.loop_delay_seconds}")
     print(f"fast_close_on_fill={args.fast_close_on_fill}")
     print(f"prebuild_close_order={args.prebuild_close_order}")
+    print(f"close_mode={args.close_mode}")
     print(f"execute_live={args.execute_live}")
     print(f"required_confirmation={CONFIRM_TEXT}")
     print("market_selection=lowest_expected_loss_bps_then_live_spread_bps")
     print("entry_order_type=market_ioc_buy")
-    print("close_order_type=market_ioc_reduce_only_sell")
+    close_order_type = "market_ioc_sell" if args.close_mode == "netting" else "market_ioc_reduce_only_sell"
+    print(f"close_order_type={close_order_type}")
     print("volume_counter=estimated_gross_notional_buy_plus_sell")
     print("execution_event_schema=perpdex.execution_event.v1")
     print("execution_event_output=execution_event_json")
@@ -260,7 +282,7 @@ def main() -> None:
     if signed_entry is None:
         print("volume_ready=False")
         return
-    if args.fast_close_on_fill and args.prebuild_close_order:
+    if args.close_mode in {"fast-reduce-only", "netting"} and args.prebuild_close_order:
         try:
             dry_close_nonce_data = _next_nonce_after_signed(signed_entry)
         except RisexTradingConfigError as exc:
@@ -272,7 +294,7 @@ def main() -> None:
             credentials=credentials,
             args=_common_args(args, dry_plan.market.market_id),
             side=1,
-            reduce_only=True,
+            reduce_only=args.close_mode != "netting",
             size_steps=dry_plan.size_steps,
             price_ticks=0,
             step_size=dry_plan.market.step_size,
@@ -323,6 +345,8 @@ def _validate_args(args: argparse.Namespace) -> None:
         raise SystemExit(f"--target-gross-volume-usd must be > 0 and <= {MAX_LIVE_TARGET_USD}")
     if args.max_leg_notional_usd <= 0 or args.max_leg_notional_usd > MAX_LEG_NOTIONAL_USD:
         raise SystemExit(f"--max-leg-notional-usd must be > 0 and <= {MAX_LEG_NOTIONAL_USD}")
+    if args.max_cycles <= 0 or args.max_cycles > 20:
+        raise SystemExit("--max-cycles must be greater than 0 and <= 20")
     if args.spread_bps < 0 or args.spread_bps > Decimal("5"):
         raise SystemExit("--spread-bps must be between 0 and 5")
     if args.max_expected_loss_bps is not None and args.max_expected_loss_bps < 0:
@@ -339,8 +363,17 @@ def _validate_args(args: argparse.Namespace) -> None:
         raise SystemExit("--position-settle-attempts must be greater than zero")
     if args.position_settle_delay_seconds < 0:
         raise SystemExit("--position-settle-delay-seconds must be zero or greater")
-    if args.prebuild_close_order and not args.fast_close_on_fill:
-        raise SystemExit("--prebuild-close-order requires --fast-close-on-fill")
+    if args.prebuild_close_order and args.close_mode == "confirmed":
+        raise SystemExit("--prebuild-close-order requires --fast-close-on-fill or --close-mode netting")
+
+
+def _normalize_close_mode_args(args: argparse.Namespace) -> None:
+    if args.close_mode is None:
+        args.close_mode = "fast-reduce-only" if args.fast_close_on_fill else "confirmed"
+    if args.close_mode in {"fast-reduce-only", "netting"}:
+        args.fast_close_on_fill = True
+    if args.close_mode == "netting":
+        args.prebuild_close_order = True
 
 
 def _parse_market_ids(raw: str) -> tuple[int, ...]:
@@ -490,7 +523,7 @@ def _run_volume_loop(
 ) -> None:
     total = Decimal("0")
     cycle = 0
-    while total < args.target_gross_volume_usd:
+    while total < args.target_gross_volume_usd and cycle < args.max_cycles:
         cycle_started_ns = _now_ns()
         remaining = args.target_gross_volume_usd - total
         plan_started_ns = _now_ns()
@@ -522,7 +555,7 @@ def _run_volume_loop(
             break
 
         prebuilt_close: RisexSignedPlaceOrder | None = None
-        if args.fast_close_on_fill and args.prebuild_close_order:
+        if args.close_mode in {"fast-reduce-only", "netting"} and args.prebuild_close_order:
             sign_close_started_ns = _now_ns()
             try:
                 close_nonce_data = _next_nonce_after_signed(signed_entry)
@@ -535,7 +568,7 @@ def _run_volume_loop(
                 credentials=credentials,
                 args=cycle_args,
                 side=1,
-                reduce_only=True,
+                reduce_only=args.close_mode != "netting",
                 size_steps=plan.size_steps,
                 price_ticks=0,
                 step_size=plan.market.step_size,
@@ -547,6 +580,108 @@ def _run_volume_loop(
             if prebuilt_close is None:
                 print("volume_loop_stopped=close_prebuild_signing_failed")
                 break
+
+        if args.close_mode == "netting":
+            if prebuilt_close is None:
+                print("manual_review_required=True")
+                print("volume_loop_stopped=netting_close_prebuild_missing")
+                break
+            print(f"cycle_{cycle}_fast_close_on_fill=True")
+            print(f"cycle_{cycle}_close_mode=netting")
+            print(f"cycle_{cycle}_close_order_prebuilt=True")
+            print(f"cycle_{cycle}_netting_submit_mode=parallel_no_entry_response_wait")
+            print(f"cycle_{cycle}_entry_submitting=True")
+            print(f"cycle_{cycle}_close_submitting=True")
+            entry_post, close_post = _submit_netting_pair_without_entry_wait(
+                adapter=adapter,
+                signed_entry=signed_entry,
+                signed_close=prebuilt_close,
+            )
+            print(f"cycle_{cycle}_entry_post_latency_ms={_elapsed_ms(entry_post.started_ns, entry_post.done_ns)}")
+            print(f"cycle_{cycle}_close_post_latency_ms={_elapsed_ms(close_post.started_ns, close_post.done_ns)}")
+            print(f"cycle_{cycle}_entry_to_close_submit_gap_ms={_elapsed_ms(entry_post.started_ns, close_post.started_ns)}")
+            if entry_post.error:
+                print("manual_review_required=True")
+                print("volume_loop_stopped=entry_adapter_error")
+                print(f"cycle_{cycle}_entry_adapter_error={entry_post.error}")
+                break
+            if close_post.error:
+                print("manual_review_required=True")
+                print("volume_loop_stopped=close_adapter_error")
+                print(f"cycle_{cycle}_close_adapter_error={close_post.error}")
+                break
+            if entry_post.result is None or close_post.result is None:
+                print("manual_review_required=True")
+                print("volume_loop_stopped=netting_parallel_submit_missing_result")
+                break
+            _print_post_result(f"cycle_{cycle}_entry", entry_post.result)
+            _print_post_result(f"cycle_{cycle}_close", close_post.result)
+            if not entry_post.result.ok:
+                print("manual_review_required=True")
+                print("volume_loop_stopped=entry_order_failed")
+                break
+            if not close_post.result.ok:
+                print("manual_review_required=True")
+                print("volume_loop_stopped=close_order_failed")
+                break
+
+            residual_steps = _current_signed_position_steps(
+                api_endpoint,
+                credentials["account_address"],
+                plan.market.step_size,
+                cycle_args,
+                label=f"cycle_{cycle}_netting_final",
+            )
+            close_post_done_ns = close_post.done_ns
+            if residual_steps is None:
+                print("manual_review_required=True")
+                print("volume_loop_stopped=netting_residual_check_failed")
+                break
+            if residual_steps != 0:
+                print(f"cycle_{cycle}_netting_residual_position_detected=True")
+                rescue_side = 1 if residual_steps > 0 else 0
+                rescue_steps = abs(residual_steps)
+                sign_rescue_started_ns = _now_ns()
+                signed_rescue = _build_signed_order(
+                    api_endpoint=api_endpoint,
+                    credentials=credentials,
+                    args=cycle_args,
+                    side=rescue_side,
+                    reduce_only=True,
+                    size_steps=rescue_steps,
+                    price_ticks=0,
+                    step_size=plan.market.step_size,
+                    step_price=plan.market.step_price,
+                    label=f"cycle_{cycle}_netting_rescue_close",
+                )
+                print(f"cycle_{cycle}_netting_rescue_close_sign_latency_ms={_elapsed_ms(sign_rescue_started_ns)}")
+                if signed_rescue is None:
+                    print("manual_review_required=True")
+                    print("volume_loop_stopped=netting_rescue_signing_failed")
+                    break
+                rescue_post_started_ns = _now_ns()
+                try:
+                    rescue_result = adapter.submit_signed_place_order(signed_rescue)
+                except AdapterError as exc:
+                    print("manual_review_required=True")
+                    print("volume_loop_stopped=netting_rescue_adapter_error")
+                    print(f"cycle_{cycle}_netting_rescue_adapter_error={exc}")
+                    break
+                rescue_post_done_ns = _now_ns()
+                print(f"cycle_{cycle}_netting_rescue_close_post_latency_ms={_elapsed_ms(rescue_post_started_ns, rescue_post_done_ns)}")
+                _print_post_result(f"cycle_{cycle}_netting_rescue_close", rescue_result)
+                if not rescue_result.ok:
+                    print("manual_review_required=True")
+                    print("volume_loop_stopped=netting_rescue_order_failed")
+                    break
+                close_post_done_ns = rescue_post_done_ns
+
+            total += plan.estimated_roundtrip_notional
+            print(f"cycle_{cycle}_estimated_gross_volume_usd={fmt_decimal(plan.estimated_roundtrip_notional)}")
+            print(f"volume_progress_usd={fmt_decimal(total)}")
+            print(f"cycle_{cycle}_total_latency_ms={_elapsed_ms(cycle_started_ns, close_post_done_ns)}")
+            time.sleep(args.loop_delay_seconds)
+            continue
 
         print(f"cycle_{cycle}_entry_submitting=True")
         entry_post_started_ns = _now_ns()
@@ -563,9 +698,10 @@ def _run_volume_loop(
             print("volume_loop_stopped=entry_order_failed")
             break
 
-        if args.fast_close_on_fill:
+        if args.close_mode in {"fast-reduce-only", "netting"}:
             close_steps = plan.size_steps
             print(f"cycle_{cycle}_fast_close_on_fill=True")
+            print(f"cycle_{cycle}_close_mode={args.close_mode}")
             print(f"cycle_{cycle}_post_entry_position_check_skipped=True")
             print(f"cycle_{cycle}_close_market_check_skipped=True")
             if prebuilt_close is not None:
@@ -578,7 +714,7 @@ def _run_volume_loop(
                     credentials=credentials,
                     args=cycle_args,
                     side=1,
-                    reduce_only=True,
+                    reduce_only=args.close_mode != "netting",
                     size_steps=close_steps,
                     price_ticks=0,
                     step_size=plan.market.step_size,
@@ -650,12 +786,65 @@ def _run_volume_loop(
             print("volume_loop_stopped=close_order_failed")
             break
 
+        if args.close_mode == "netting":
+            residual_steps = _current_signed_position_steps(
+                api_endpoint,
+                credentials["account_address"],
+                plan.market.step_size,
+                cycle_args,
+                label=f"cycle_{cycle}_netting_final",
+            )
+            if residual_steps is None:
+                print("manual_review_required=True")
+                print("volume_loop_stopped=netting_residual_check_failed")
+                break
+            if residual_steps != 0:
+                print(f"cycle_{cycle}_netting_residual_position_detected=True")
+                rescue_side = 1 if residual_steps > 0 else 0
+                rescue_steps = abs(residual_steps)
+                sign_rescue_started_ns = _now_ns()
+                signed_rescue = _build_signed_order(
+                    api_endpoint=api_endpoint,
+                    credentials=credentials,
+                    args=cycle_args,
+                    side=rescue_side,
+                    reduce_only=True,
+                    size_steps=rescue_steps,
+                    price_ticks=0,
+                    step_size=plan.market.step_size,
+                    step_price=plan.market.step_price,
+                    label=f"cycle_{cycle}_netting_rescue_close",
+                )
+                print(f"cycle_{cycle}_netting_rescue_close_sign_latency_ms={_elapsed_ms(sign_rescue_started_ns)}")
+                if signed_rescue is None:
+                    print("manual_review_required=True")
+                    print("volume_loop_stopped=netting_rescue_signing_failed")
+                    break
+                rescue_post_started_ns = _now_ns()
+                try:
+                    rescue_result = adapter.submit_signed_place_order(signed_rescue)
+                except AdapterError as exc:
+                    print("manual_review_required=True")
+                    print("volume_loop_stopped=netting_rescue_adapter_error")
+                    print(f"cycle_{cycle}_netting_rescue_adapter_error={exc}")
+                    break
+                rescue_post_done_ns = _now_ns()
+                print(f"cycle_{cycle}_netting_rescue_close_post_latency_ms={_elapsed_ms(rescue_post_started_ns, rescue_post_done_ns)}")
+                _print_post_result(f"cycle_{cycle}_netting_rescue_close", rescue_result)
+                if not rescue_result.ok:
+                    print("manual_review_required=True")
+                    print("volume_loop_stopped=netting_rescue_order_failed")
+                    break
+                close_post_done_ns = rescue_post_done_ns
+
         total += plan.estimated_roundtrip_notional
         print(f"cycle_{cycle}_estimated_gross_volume_usd={fmt_decimal(plan.estimated_roundtrip_notional)}")
         print(f"volume_progress_usd={fmt_decimal(total)}")
         print(f"cycle_{cycle}_total_latency_ms={_elapsed_ms(cycle_started_ns, close_post_done_ns)}")
         time.sleep(args.loop_delay_seconds)
 
+    if total < args.target_gross_volume_usd and cycle >= args.max_cycles:
+        print(f"volume_loop_stopped=max_cycles_reached:{args.max_cycles}")
     _print_final_state(api_endpoint, credentials["account_address"], markets, args, total)
 
 
@@ -863,6 +1052,70 @@ def _estimate_roundtrip_loss_usd(one_side_notional_usd: Decimal, expected_loss_b
     if expected_loss_bps is None:
         return None
     return one_side_notional_usd * expected_loss_bps / Decimal("10000")
+
+
+def _current_signed_position_steps(
+    api_endpoint: str,
+    account: str,
+    step_size: Decimal,
+    args: SimpleNamespace,
+    *,
+    label: str,
+) -> int | None:
+    try:
+        positions_payload = read_only_get_json(
+            api_endpoint,
+            "/v1/positions",
+            {"account": account, "market_id": args.market_id, "page_size": 100},
+            args.timeout_seconds,
+            private_readonly=True,
+        )
+        positions = _extract_positions(positions_payload)
+        sizes = [_position_size(position) for position in positions]
+        nonzero = [size for size in sizes if size != 0]
+    except (HTTPError, TimeoutError, URLError, ValueError, KeyError, IndexError, RisexReadonlyConfigError) as exc:
+        print(f"{label}_position_check_error={exc.__class__.__name__}")
+        return None
+
+    print(f"{label}_position_count={len(nonzero)}")
+    if not nonzero:
+        print(f"{label}_signed_position_steps=0")
+        return 0
+    size = nonzero[0]
+    steps = _size_to_steps(abs(size), step_size)
+    signed_steps = steps if size > 0 else -steps
+    print(f"{label}_signed_position_steps={signed_steps}")
+    return signed_steps
+
+
+def _submit_netting_pair_without_entry_wait(
+    *,
+    adapter: RisexAdapter,
+    signed_entry: RisexSignedPlaceOrder,
+    signed_close: RisexSignedPlaceOrder,
+) -> tuple[TimedRisexPost, TimedRisexPost]:
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        entry_future = executor.submit(_timed_submit_signed_order, adapter, signed_entry)
+        close_future = executor.submit(_timed_submit_signed_order, adapter, signed_close)
+        return entry_future.result(), close_future.result()
+
+
+def _timed_submit_signed_order(adapter: RisexAdapter, signed_order: RisexSignedPlaceOrder) -> TimedRisexPost:
+    started_ns = _now_ns()
+    try:
+        result = adapter.submit_signed_place_order(signed_order)
+    except AdapterError as exc:
+        return TimedRisexPost(
+            result=None,
+            started_ns=started_ns,
+            done_ns=_now_ns(),
+            error=str(exc),
+        )
+    return TimedRisexPost(
+        result=result,
+        started_ns=started_ns,
+        done_ns=_now_ns(),
+    )
 
 
 def _emit_blocked_execution_event(
