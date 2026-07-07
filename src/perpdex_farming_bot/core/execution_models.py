@@ -175,6 +175,40 @@ class ExecutionResult:
 
 
 @dataclass(frozen=True)
+class ReadOnlyCheckResult:
+    name: str
+    attempted: bool
+    ok: bool
+    status: str
+    count: int = 0
+    error: str | None = None
+
+
+@dataclass(frozen=True)
+class ExecutionPreflightRequest:
+    request_id: str
+    trade_intent: TradeIntent
+    include_read_only: bool = False
+    check_positions: bool = True
+    check_open_orders: bool = True
+
+
+@dataclass(frozen=True)
+class ExecutionPreflightResult:
+    request_id: str
+    mode: ExecutionMode
+    account_alias: str
+    exchange_id: str
+    market: str
+    ready: bool
+    status: str
+    reason: str
+    execution_result: ExecutionResult
+    checks: tuple[ReadOnlyCheckResult, ...] = ()
+    live_order_submitted: bool = False
+
+
+@dataclass(frozen=True)
 class RoundtripResult:
     request_id: str
     mode: ExecutionMode

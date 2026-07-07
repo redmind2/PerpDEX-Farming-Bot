@@ -35,6 +35,7 @@ BUILTIN_GATEWAY_EXCHANGE_IDS = (
 class LazyExchangeAdapterBridge:
     exchange_id: str
     adapter_factory: Callable[[], ExchangeAdapter]
+    open_orders_supported: bool = False
     _adapter: ExchangeAdapter | None = field(default=None, init=False, repr=False)
 
     def get_top_of_book(self, market: str) -> TopOfBook:
@@ -53,9 +54,11 @@ class LazyExchangeAdapterBridge:
         )
 
     def list_open_orders(self, account_alias: str, market: str | None = None) -> tuple[OpenOrderSnapshot, ...]:
+        if not self.open_orders_supported:
+            raise AdapterError(f"{self.exchange_id} open-order read-only check is not connected yet")
         method = getattr(self._adapter_instance(), "list_open_orders", None)
         if method is None:
-            return ()
+            raise AdapterError(f"{self.exchange_id} adapter does not implement open-order read-only check")
         raw_orders = _call_list_open_orders(method, market)
         return tuple(_open_order_snapshot(self.exchange_id, account_alias, item) for item in raw_orders)
 
@@ -64,8 +67,11 @@ class LazyExchangeAdapterBridge:
         return ()
 
     def list_trade_fills(self, account_alias: str, market: str | None = None) -> tuple[TradeFillSnapshot, ...]:
-        del account_alias, market
-        return ()
+        method = getattr(self._adapter_instance(), "list_trade_fills", None)
+        if method is None:
+            return ()
+        raw_fills = _call_list_trade_fills(method, market)
+        return tuple(_trade_fill_snapshot(self.exchange_id, account_alias, item) for item in raw_fills)
 
     def submit_order(self, order: OrderIntent, *, mode: ExecutionMode) -> OrderExecutionResult:
         return OrderExecutionResult(
@@ -90,16 +96,17 @@ class GatewayExchangeBinding:
     adapter: LazyExchangeAdapterBridge
     fee_provider: CommonFeeProvider
     account_policy: AccountPolicy
+    open_orders_supported: bool = False
 
 
 def builtin_gateway_exchange_bindings() -> tuple[GatewayExchangeBinding, ...]:
     return (
         _binding("hibachi", "BTC/USDT-P", _create_hibachi_adapter),
         _binding("hotstuff", "BTC-PERP", _create_hotstuff_adapter),
-        _binding("hyperliquid", "BTC", _create_hyperliquid_adapter),
-        _binding("lighter", "BTC-PERP", _create_lighter_adapter),
-        _binding("pacifica", "BTC", _create_pacifica_adapter),
-        _binding("risex", "1", _create_risex_adapter),
+        _binding("hyperliquid", "BTC", _create_hyperliquid_adapter, open_orders_supported=True),
+        _binding("lighter", "BTC-PERP", _create_lighter_adapter, open_orders_supported=True),
+        _binding("pacifica", "BTC", _create_pacifica_adapter, open_orders_supported=True),
+        _binding("risex", "1", _create_risex_adapter, open_orders_supported=True),
     )
 
 
@@ -122,13 +129,19 @@ def _binding(
     exchange_id: str,
     default_market: str,
     adapter_factory: Callable[[], ExchangeAdapter],
+    *,
+    open_orders_supported: bool = False,
 ) -> GatewayExchangeBinding:
     account_alias = f"{exchange_id}_gateway"
     return GatewayExchangeBinding(
         exchange_id=exchange_id,
         account_alias=account_alias,
         default_market=default_market,
-        adapter=LazyExchangeAdapterBridge(exchange_id=exchange_id, adapter_factory=adapter_factory),
+        adapter=LazyExchangeAdapterBridge(
+            exchange_id=exchange_id,
+            adapter_factory=adapter_factory,
+            open_orders_supported=open_orders_supported,
+        ),
         fee_provider=StaticFeeProvider(
             exchange_id=exchange_id,
             account_alias=account_alias,
@@ -147,6 +160,7 @@ def _binding(
             max_gross_notional_usd=Decimal("200"),
             kill_switch_required=True,
         ),
+        open_orders_supported=open_orders_supported,
     )
 
 
@@ -221,18 +235,44 @@ def _create_risex_adapter() -> ExchangeAdapter:
 
 
 def _call_list_open_orders(method: object, market: str | None) -> tuple[Mapping[str, object], ...]:
-    try:
-        payload = method()
-    except TypeError:
-        if market is None:
-            return ()
+    if market is not None:
         try:
-            payload = method(market=market)
-        except TypeError:
+            payload = method(market_id=int(market))
+        except (TypeError, ValueError):
             try:
-                payload = method(market_id=int(market))
-            except (TypeError, ValueError):
-                return ()
+                payload = method(market=market)
+            except TypeError:
+                try:
+                    payload = method()
+                except TypeError:
+                    return ()
+    else:
+        try:
+            payload = method()
+        except TypeError:
+            return ()
+    if not isinstance(payload, tuple):
+        return ()
+    return tuple(item for item in payload if isinstance(item, dict))
+
+
+def _call_list_trade_fills(method: object, market: str | None) -> tuple[Mapping[str, object], ...]:
+    if market is not None:
+        try:
+            payload = method(market_id=int(market))
+        except (TypeError, ValueError):
+            try:
+                payload = method(market=market)
+            except TypeError:
+                try:
+                    payload = method()
+                except TypeError:
+                    return ()
+    else:
+        try:
+            payload = method()
+        except TypeError:
+            return ()
     if not isinstance(payload, tuple):
         return ()
     return tuple(item for item in payload if isinstance(item, dict))
@@ -249,6 +289,21 @@ def _open_order_snapshot(exchange_id: str, account_alias: str, item: Mapping[str
         quantity=_optional_decimal(item, ("quantity", "size", "sz", "remaining_base_amount")) or Decimal("0"),
         filled_quantity=_optional_decimal(item, ("filled_quantity", "filled", "filled_size")) or Decimal("0"),
         reduce_only=bool(item.get("reduce_only", False)),
+        metadata=dict(item),
+    )
+
+
+def _trade_fill_snapshot(exchange_id: str, account_alias: str, item: Mapping[str, object]) -> TradeFillSnapshot:
+    return TradeFillSnapshot(
+        exchange_id=exchange_id,
+        account_alias=account_alias,
+        market=_string_field(item, ("market", "coin", "symbol", "market_id", "market_index"), "unknown"),
+        trade_id=_string_field(item, ("trade_id", "id", "trade_index"), "unknown"),
+        order_id=_string_field(item, ("order_id", "order_index", "oid"), "") or None,
+        side=_string_field(item, ("side", "role", "is_maker_ask"), "unknown"),
+        price=_optional_decimal(item, ("price", "px")) or Decimal("0"),
+        quantity=_optional_decimal(item, ("quantity", "size", "sz")) or Decimal("0"),
+        fee_usd=_optional_decimal(item, ("fee", "fee_usd", "feeUsd", "taker_fee", "maker_fee")),
         metadata=dict(item),
     )
 

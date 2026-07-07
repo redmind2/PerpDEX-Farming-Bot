@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from decimal import Decimal
+import re
 from typing import Callable, Mapping, Protocol
 
 from perpdex_farming_bot.core.execution_event import ExecutionEvent
@@ -10,10 +11,13 @@ from perpdex_farming_bot.core.execution_models import (
     AccountPolicy,
     ExecutionCostQuote,
     ExecutionMode,
+    ExecutionPreflightRequest,
+    ExecutionPreflightResult,
     ExecutionRequest,
     ExecutionResult,
     FeeQuote,
     OrderExecutionResult,
+    ReadOnlyCheckResult,
     TradeIntent,
 )
 from perpdex_farming_bot.core.fee_provider import CommonFeeProvider, FeeRequest
@@ -50,11 +54,10 @@ class ExecutionGateway:
         if policy is None:
             return self._reject(request, "account_policy_missing", "account policy was not configured")
 
-        adapter = self.adapters.get(intent.exchange_id)
-        if adapter is None:
-            return self._reject(request, "exchange_adapter_not_registered", "exchange adapter was not registered")
-        if adapter.exchange_id != intent.exchange_id:
-            return self._reject(request, "exchange_adapter_id_mismatch", "registered adapter exchange_id mismatched request")
+        try:
+            self._registered_adapter(intent.exchange_id)
+        except ValueError as exc:
+            return self._reject(request, exc.args[0], exc.args[1])
 
         if not policy.allows_mode(intent.mode):
             return self._reject(request, "mode_blocked_by_account_policy", f"mode {intent.mode.value} is not allowed")
@@ -106,6 +109,96 @@ class ExecutionGateway:
         )
         self._emit_ledger(result.ledger_event)
         return result
+
+    def preflight(self, request: ExecutionPreflightRequest) -> ExecutionPreflightResult:
+        execution_result = self.execute(
+            ExecutionRequest(
+                request_id=request.request_id,
+                trade_intent=request.trade_intent,
+            )
+        )
+        if not execution_result.accepted:
+            return ExecutionPreflightResult(
+                request_id=request.request_id,
+                mode=request.trade_intent.mode,
+                account_alias=request.trade_intent.account_alias,
+                exchange_id=request.trade_intent.exchange_id,
+                market=request.trade_intent.market,
+                ready=False,
+                status=execution_result.status,
+                reason=execution_result.reason,
+                execution_result=execution_result,
+                live_order_submitted=False,
+            )
+
+        checks: list[ReadOnlyCheckResult] = []
+        if not request.include_read_only:
+            checks.append(ReadOnlyCheckResult("read_only", False, True, "read_only_checks_skipped"))
+            return ExecutionPreflightResult(
+                request_id=request.request_id,
+                mode=request.trade_intent.mode,
+                account_alias=request.trade_intent.account_alias,
+                exchange_id=request.trade_intent.exchange_id,
+                market=request.trade_intent.market,
+                ready=True,
+                status="preflight_ready_no_read_only",
+                reason="policy, adapter, and fee checks passed; private read-only checks were not requested",
+                execution_result=execution_result,
+                checks=tuple(checks),
+                live_order_submitted=False,
+            )
+
+        adapter = self._registered_adapter(request.trade_intent.exchange_id)
+        if request.check_positions:
+            checks.append(self._check_positions(adapter, request.trade_intent.account_alias))
+        if request.check_open_orders:
+            checks.append(self._check_open_orders(adapter, request.trade_intent.account_alias, request.trade_intent.market))
+
+        failed = tuple(check for check in checks if not check.ok)
+        ready = not failed
+        status = "preflight_ready" if ready else "preflight_blocked_by_read_only_check"
+        reason = "read-only checks passed" if ready else ",".join(check.status for check in failed)
+        return ExecutionPreflightResult(
+            request_id=request.request_id,
+            mode=request.trade_intent.mode,
+            account_alias=request.trade_intent.account_alias,
+            exchange_id=request.trade_intent.exchange_id,
+            market=request.trade_intent.market,
+            ready=ready,
+            status=status,
+            reason=reason,
+            execution_result=execution_result,
+            checks=tuple(checks),
+            live_order_submitted=False,
+        )
+
+    def _registered_adapter(self, exchange_id: str) -> GatewayOrderAdapter:
+        adapter = self.adapters.get(exchange_id)
+        if adapter is None:
+            raise ValueError("exchange_adapter_not_registered", "exchange adapter was not registered")
+        if adapter.exchange_id != exchange_id:
+            raise ValueError("exchange_adapter_id_mismatch", "registered adapter exchange_id mismatched request")
+        return adapter
+
+    def _check_positions(self, adapter: GatewayOrderAdapter, account_alias: str) -> ReadOnlyCheckResult:
+        try:
+            positions = adapter.list_positions(account_alias)
+        except Exception as exc:
+            return ReadOnlyCheckResult("positions", True, False, "positions_read_failed", error=_safe_error(exc))
+        nonzero_count = sum(0 if position.is_flat else 1 for position in positions)
+        if nonzero_count:
+            return ReadOnlyCheckResult("positions", True, False, "positions_nonzero", count=nonzero_count)
+        return ReadOnlyCheckResult("positions", True, True, "positions_flat", count=0)
+
+    def _check_open_orders(self, adapter: GatewayOrderAdapter, account_alias: str, market: str) -> ReadOnlyCheckResult:
+        try:
+            open_orders = adapter.list_open_orders(account_alias, market)
+        except Exception as exc:
+            return ReadOnlyCheckResult("open_orders", True, False, "open_orders_read_failed", error=_safe_error(exc))
+        order_count = len(open_orders)
+        if order_count:
+            return ReadOnlyCheckResult("open_orders", True, False, "open_orders_detected", count=order_count)
+        return ReadOnlyCheckResult("open_orders", True, True, "open_orders_empty", count=0)
 
     def _quote_fee(self, intent: TradeIntent, policy: AccountPolicy) -> FeeQuote | None:
         if self.fee_provider is None:
@@ -235,3 +328,9 @@ def _estimate_fee_usd(intent: TradeIntent, fee_quote: FeeQuote) -> Decimal | Non
             return None
         total += notional * fee_bps / Decimal("10000")
     return total
+
+
+def _safe_error(exc: Exception) -> str:
+    text = str(exc) or exc.__class__.__name__
+    text = re.sub(r"0x[a-fA-F0-9]{40,}", "0x[redacted]", text)
+    return text[:240]

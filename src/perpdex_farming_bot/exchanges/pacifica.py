@@ -70,6 +70,19 @@ class PacificaAdapter:
             return False, "missing_api_agent_private_key"
         return True, "api_agent_key_env_present_not_bound_verified"
 
+    def list_open_orders(self) -> tuple[dict[str, object], ...]:
+        params = read_pacifica_private_readonly_params(self.credential_prefix, self.environment)
+        if not params["account"]:
+            raise AdapterError("Pacifica account address env is required for private read-only open orders")
+        payload = read_only_get_json(
+            self.api_endpoint,
+            "/orders",
+            {"account": params["account"]},
+            self.timeout_seconds,
+            private_readonly=True,
+        )
+        return tuple(item for item in _array_payload(payload) if isinstance(item, dict))
+
     def build_market_order_request(
         self,
         *,

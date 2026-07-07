@@ -73,6 +73,34 @@ class LighterAdapter:
         )
         return tuple(_walk_order_objects(payload))
 
+    def list_trade_fills(self, *, market_id: int | None = None, limit: int = 100) -> tuple[dict[str, object], ...]:
+        params = read_lighter_private_readonly_params(self.credential_prefix, self.environment)
+        account_index = params["account_index"]
+        auth_token = params["read_only_auth_token"]
+        if not account_index:
+            raise AdapterError("Lighter account index env is required for read-only trades")
+        if not auth_token:
+            raise AdapterError("Lighter read-only auth token env is required for read-only trades")
+        query: dict[str, object] = {
+            "account_index": account_index,
+            "market_type": "all",
+            "limit": limit,
+            "sort_by": "timestamp",
+            "sort_dir": "desc",
+        }
+        if market_id is not None:
+            query["market_id"] = market_id
+            query["market_type"] = "perp"
+        payload = read_only_get_json(
+            self.api_endpoint,
+            "/api/v1/trades",
+            query,
+            self.timeout_seconds,
+            private_readonly=True,
+            read_only_auth_token=auth_token,
+        )
+        return tuple(_walk_trade_objects(payload))
+
     def signer_ready(self) -> tuple[bool, str]:
         credentials = read_lighter_credentials(self.credential_prefix, self.environment)
         if not credentials["account_index"]:
@@ -141,6 +169,14 @@ def _walk_position_objects(payload: object) -> list[dict[str, object]]:
 def _walk_order_objects(payload: object) -> list[dict[str, object]]:
     result: list[dict[str, object]] = []
     _walk_objects_with_keys(payload, {"order_index", "market_index", "remaining_base_amount"}, result)
+    return result
+
+
+def _walk_trade_objects(payload: object) -> list[dict[str, object]]:
+    result: list[dict[str, object]] = []
+    _walk_objects_with_keys(payload, {"trade_id", "price", "size"}, result)
+    if not result:
+        _walk_objects_with_keys(payload, {"price", "size", "market_id"}, result)
     return result
 
 

@@ -83,6 +83,25 @@ class RisexAdapter:
             return False, "signer_private_key_does_not_match_signer_address"
         return True, "signer_env_present_key_matches_signer_address"
 
+    def list_open_orders(self, *, market_id: int | None = None) -> tuple[dict[str, object], ...]:
+        params = read_risex_private_readonly_params(self.credential_prefix, self.environment)
+        if not params["account"]:
+            raise AdapterError("RiseX account address env is required for private read-only open orders")
+        query: dict[str, object] = {
+            "account": params["account"],
+            "limit": 100,
+        }
+        if market_id is not None:
+            query["market_id"] = market_id
+        payload = read_only_get_json(
+            self.api_endpoint,
+            "/v1/orders/open",
+            query,
+            self.timeout_seconds,
+            private_readonly=True,
+        )
+        return tuple(item for item in _orders_payload(payload) if isinstance(item, dict))
+
     def execute_paired_notional_roundtrip(
         self,
         *,
@@ -124,6 +143,26 @@ def _object_payload(payload: object) -> dict[str, object]:
     if isinstance(data, dict):
         return data
     return payload
+
+
+def _orders_payload(payload: object) -> list[object]:
+    if isinstance(payload, list):
+        return payload
+    if not isinstance(payload, dict):
+        return []
+    data = payload.get("data")
+    if isinstance(data, list):
+        return data
+    if isinstance(data, dict):
+        for key in ("orders", "items"):
+            value = data.get(key)
+            if isinstance(value, list):
+                return value
+    for key in ("orders", "items"):
+        value = payload.get(key)
+        if isinstance(value, list):
+            return value
+    return []
 
 
 def _position_market(position: dict[str, object]) -> str:
