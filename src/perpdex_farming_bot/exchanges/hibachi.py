@@ -37,6 +37,26 @@ class HibachiAdapter:
             positions.append(ExchangePosition(self.exchange_id, market, signed_size, direction or "unknown"))
         return tuple(positions)
 
+    def list_open_orders(self) -> tuple[dict[str, object], ...]:
+        response = self._client().get_pending_orders()
+        orders: list[dict[str, object]] = []
+        for order in getattr(response, "orders", ()):
+            market = str(getattr(order, "symbol", "") or getattr(order, "market", "") or "unknown")
+            order_id = getattr(order, "orderId", None) or getattr(order, "order_id", None) or getattr(order, "id", "")
+            side = getattr(order, "side", "")
+            quantity = getattr(order, "quantity", None) or getattr(order, "size", None) or getattr(order, "amount", "0")
+            price = getattr(order, "price", None)
+            orders.append(
+                {
+                    "market": market,
+                    "order_id": str(order_id) if order_id is not None else "",
+                    "side": str(side),
+                    "quantity": str(quantity),
+                    "price": str(price) if price is not None else "",
+                }
+            )
+        return tuple(orders)
+
     def execute_paired_notional_roundtrip(
         self,
         *,
