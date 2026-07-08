@@ -59,6 +59,24 @@ class HotstuffAdapter:
             )
         return tuple(positions)
 
+    def list_open_orders(self) -> tuple[dict[str, object], ...]:
+        params = read_hotstuff_private_readonly_params(self.credential_prefix, self.environment)
+        payload = info_post_json(
+            self.api_endpoint,
+            "openOrders",
+            params,
+            self.timeout_seconds,
+            private_readonly=True,
+        )
+        if isinstance(payload, list):
+            return tuple(item for item in payload if isinstance(item, dict))
+        if isinstance(payload, dict):
+            for key in ("orders", "open_orders", "data"):
+                value = payload.get(key)
+                if isinstance(value, list):
+                    return tuple(item for item in value if isinstance(item, dict))
+        return ()
+
     def signer_ready(self) -> tuple[bool, str]:
         from eth_account import Account
 
