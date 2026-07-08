@@ -35,9 +35,16 @@ from perpdex_farming_bot.connectors.risex_trading import (
     sign_place_order_verify_signature,
 )
 from perpdex_farming_bot.credentials import read_risex_credentials, risex_credential_env
+from perpdex_farming_bot.core.execution_models import OrderKind, RoundtripMode
 from perpdex_farming_bot.env import get_env, load_dotenv_if_present, masked_env_status
 from perpdex_farming_bot.exchanges.base import AdapterError
 from perpdex_farming_bot.exchanges.risex import RisexAdapter
+from perpdex_farming_bot.gateway.live_preflight import (
+    build_live_preflight_gateway,
+    paired_live_trade_intent,
+    run_live_gateway_preflight,
+)
+from perpdex_farming_bot.gateway.live_action import GatewayLiveActionProxy
 
 
 CONFIRM_TEXT = "LIVE_RISEX_TINY_BTC_ROUNDTRIP"
@@ -172,6 +179,23 @@ def main() -> None:
     if signed_entry is None:
         return
 
+    gateway_preflight = _run_gateway_roundtrip_preflight(
+        api_endpoint=api_endpoint,
+        credential_prefix=args.credential_prefix,
+        environment=environment,
+        account_alias=f"{credential_env.prefix}_gateway",
+        market=str(args.market_id),
+        size=initial_plan.planned_size,
+        buy_reference_price=initial_plan.best_ask,
+        sell_reference_price=initial_plan.best_bid,
+        max_notional_usd=args.max_notional_usd,
+        timeout_seconds=args.timeout_seconds,
+    )
+    if not gateway_preflight.ready:
+        print("live_ready=False")
+        print("reason=gateway_preflight_not_ready")
+        return
+
     if not args.execute_live:
         print("live_ready=True")
         print(f"live_skipped=pass_--execute-live_and_--confirm_{CONFIRM_TEXT}")
@@ -212,6 +236,26 @@ def main() -> None:
         timeout_seconds=args.timeout_seconds,
         allow_live_orders=True,
     )
+    live_gateway, live_trade_intent = _build_gateway_roundtrip_context(
+        api_endpoint=api_endpoint,
+        credential_prefix=args.credential_prefix,
+        environment=environment,
+        account_alias=f"{credential_env.prefix}_gateway",
+        market=str(args.market_id),
+        size=fresh_plan.planned_size,
+        buy_reference_price=fresh_plan.best_ask,
+        sell_reference_price=fresh_plan.best_bid,
+        max_notional_usd=args.max_notional_usd,
+        timeout_seconds=args.timeout_seconds,
+        live_orders_enabled=True,
+    )
+    live_adapter = GatewayLiveActionProxy(
+        target=live_adapter,
+        gateway=live_gateway,
+        trade_intent=live_trade_intent,
+        request_id_prefix="risex-live-test-gateway-submit",
+    )
+    print("live_submit_route=execution_gateway_live_action_proxy")
     print("live_entry_submitting=True")
     try:
         entry_result = live_adapter.submit_signed_place_order(signed_entry)
@@ -298,6 +342,172 @@ def _validate_args(args: argparse.Namespace) -> None:
         raise SystemExit("--position-settle-attempts must be greater than zero")
     if args.position_settle_delay_seconds < 0:
         raise SystemExit("--position-settle-delay-seconds must be zero or greater")
+
+
+def _run_gateway_roundtrip_preflight(
+    *,
+    api_endpoint: str,
+    credential_prefix: str,
+    environment: str,
+    account_alias: str,
+    market: str,
+    size: Decimal,
+    buy_reference_price: Decimal,
+    sell_reference_price: Decimal,
+    max_notional_usd: Decimal,
+    timeout_seconds: float,
+):
+    gateway, trade_intent = _build_gateway_roundtrip_context(
+        api_endpoint=api_endpoint,
+        credential_prefix=credential_prefix,
+        environment=environment,
+        account_alias=account_alias,
+        market=market,
+        size=size,
+        buy_reference_price=buy_reference_price,
+        sell_reference_price=sell_reference_price,
+        max_notional_usd=max_notional_usd,
+        timeout_seconds=timeout_seconds,
+        live_orders_enabled=False,
+    )
+    return run_live_gateway_preflight(
+        gateway=gateway,
+        trade_intent=trade_intent,
+        request_id="risex-live-test-gateway-preflight",
+        include_read_only=True,
+    )
+
+
+def _build_gateway_roundtrip_context(
+    *,
+    api_endpoint: str,
+    credential_prefix: str,
+    environment: str,
+    account_alias: str,
+    market: str,
+    size: Decimal,
+    buy_reference_price: Decimal,
+    sell_reference_price: Decimal,
+    max_notional_usd: Decimal,
+    timeout_seconds: float,
+    live_orders_enabled: bool,
+):
+    trade_intent = paired_live_trade_intent(
+        exchange_id="risex",
+        account_alias=account_alias,
+        strategy_id="risex_live_test",
+        market=market,
+        roundtrip_mode=RoundtripMode.CONFIRMED,
+        quantity=size,
+        buy_reference_price=buy_reference_price,
+        sell_reference_price=sell_reference_price,
+        buy_order_type=OrderKind.MARKET,
+        sell_order_type=OrderKind.MARKET,
+        max_gross_notional_usd=max_notional_usd * Decimal("2"),
+        metadata={"planned_gross_volume_usd": str(max_notional_usd * Decimal("2"))},
+    )
+    gateway = build_live_preflight_gateway(
+        exchange_id="risex",
+        account_alias=account_alias,
+        market=market,
+        adapter_factory=lambda: RisexAdapter(
+            api_endpoint=api_endpoint,
+            credential_prefix=credential_prefix,
+            environment=environment,
+            timeout_seconds=timeout_seconds,
+            allow_live_orders=False,
+        ),
+        entry_fee_bps=Decimal("3"),
+        exit_fee_bps=Decimal("3"),
+        fee_source="risex_tiny_live_test_conservative_default",
+        max_order_notional_usd=max_notional_usd + Decimal("1"),
+        max_gross_notional_usd=max_notional_usd * Decimal("2"),
+        open_orders_supported=True,
+        live_orders_enabled=live_orders_enabled,
+    )
+    return gateway, trade_intent
+
+
+def _run_gateway_close_preflight(
+    *,
+    api_endpoint: str,
+    credential_prefix: str,
+    environment: str,
+    account_alias: str,
+    market: str,
+    size: Decimal,
+    reference_price: Decimal,
+    max_notional_usd: Decimal,
+    timeout_seconds: float,
+):
+    gateway, trade_intent = _build_gateway_close_context(
+        api_endpoint=api_endpoint,
+        credential_prefix=credential_prefix,
+        environment=environment,
+        account_alias=account_alias,
+        market=market,
+        size=size,
+        reference_price=reference_price,
+        max_notional_usd=max_notional_usd,
+        timeout_seconds=timeout_seconds,
+        live_orders_enabled=False,
+    )
+    return run_live_gateway_preflight(
+        gateway=gateway,
+        trade_intent=trade_intent,
+        request_id="risex-close-existing-gateway-preflight",
+        include_read_only=True,
+        check_positions=False,
+        check_open_orders=True,
+    )
+
+
+def _build_gateway_close_context(
+    *,
+    api_endpoint: str,
+    credential_prefix: str,
+    environment: str,
+    account_alias: str,
+    market: str,
+    size: Decimal,
+    reference_price: Decimal,
+    max_notional_usd: Decimal,
+    timeout_seconds: float,
+    live_orders_enabled: bool,
+):
+    trade_intent = paired_live_trade_intent(
+        exchange_id="risex",
+        account_alias=account_alias,
+        strategy_id="risex_close_existing",
+        market=market,
+        roundtrip_mode=RoundtripMode.FAST_REDUCE_ONLY,
+        quantity=size,
+        buy_reference_price=reference_price,
+        sell_reference_price=reference_price,
+        buy_order_type=OrderKind.MARKET,
+        sell_order_type=OrderKind.MARKET,
+        max_gross_notional_usd=max_notional_usd * Decimal("2"),
+    )
+    gateway = build_live_preflight_gateway(
+        exchange_id="risex",
+        account_alias=account_alias,
+        market=market,
+        adapter_factory=lambda: RisexAdapter(
+            api_endpoint=api_endpoint,
+            credential_prefix=credential_prefix,
+            environment=environment,
+            timeout_seconds=timeout_seconds,
+            allow_live_orders=False,
+        ),
+        entry_fee_bps=Decimal("3"),
+        exit_fee_bps=Decimal("3"),
+        fee_source="risex_close_existing_conservative_default",
+        max_order_notional_usd=max_notional_usd + Decimal("1"),
+        max_gross_notional_usd=max_notional_usd * Decimal("2"),
+        open_orders_supported=True,
+        live_orders_enabled=live_orders_enabled,
+    )
+    return gateway, trade_intent
 
 
 def _read_only_state_is_ready(api_endpoint: str, account: str, signer: str, args: argparse.Namespace) -> bool:
@@ -402,6 +612,22 @@ def _close_existing_position_only(api_endpoint: str, credentials: dict[str, str]
         print("reason=close_existing_signing_failed")
         return
 
+    gateway_preflight = _run_gateway_close_preflight(
+        api_endpoint=api_endpoint,
+        credential_prefix=args.credential_prefix,
+        environment=normalize_risex_environment(args.environment),
+        account_alias=f"{args.credential_prefix}_gateway",
+        market=str(args.market_id),
+        size=Decimal(close_size_steps) * close_plan.step_size,
+        reference_price=close_plan.best_bid,
+        max_notional_usd=args.max_notional_usd,
+        timeout_seconds=args.timeout_seconds,
+    )
+    if not gateway_preflight.ready:
+        print("live_ready=False")
+        print("reason=gateway_preflight_not_ready")
+        return
+
     if not args.execute_live:
         print("live_ready=True")
         print(f"live_skipped=pass_--execute-live_and_--confirm_{CONFIRM_TEXT}")
@@ -418,6 +644,25 @@ def _close_existing_position_only(api_endpoint: str, credentials: dict[str, str]
         timeout_seconds=args.timeout_seconds,
         allow_live_orders=True,
     )
+    live_gateway, live_trade_intent = _build_gateway_close_context(
+        api_endpoint=api_endpoint,
+        credential_prefix=args.credential_prefix,
+        environment=normalize_risex_environment(args.environment),
+        account_alias=f"{args.credential_prefix}_gateway",
+        market=str(args.market_id),
+        size=Decimal(close_size_steps) * close_plan.step_size,
+        reference_price=close_plan.best_bid,
+        max_notional_usd=args.max_notional_usd,
+        timeout_seconds=args.timeout_seconds,
+        live_orders_enabled=True,
+    )
+    live_adapter = GatewayLiveActionProxy(
+        target=live_adapter,
+        gateway=live_gateway,
+        trade_intent=live_trade_intent,
+        request_id_prefix="risex-close-existing-gateway-submit",
+    )
+    print("live_submit_route=execution_gateway_live_action_proxy")
     print("close_existing_submitting=True")
     try:
         close_result = live_adapter.submit_signed_place_order(signed_close)

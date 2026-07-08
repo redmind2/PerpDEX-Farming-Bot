@@ -16,8 +16,15 @@ from perpdex_farming_bot.connectors.hibachi_readonly import (
     endpoint_from_env,
 )
 from perpdex_farming_bot.core.execution_event import ExecutionEvent, emit_execution_event
+from perpdex_farming_bot.core.execution_models import OrderKind, RoundtripMode
 from perpdex_farming_bot.credentials import read_hibachi_credentials
 from perpdex_farming_bot.env import get_env, load_dotenv_if_present
+from perpdex_farming_bot.gateway.live_preflight import (
+    build_live_preflight_gateway,
+    paired_live_trade_intent,
+    run_live_gateway_preflight,
+)
+from perpdex_farming_bot.gateway.live_action import GatewayLiveActionProxy
 
 
 CONFIRM_TEXT = "LIVE_HIBACHI_BTC_MARKET_ROUNDTRIP"
@@ -259,6 +266,57 @@ def main() -> None:
     if quantity <= 0:
         print("live_skipped=quantity_zero")
         return
+
+    gateway_roundtrip_mode = _gateway_roundtrip_mode(args)
+    gateway_account_alias = f"{args.credential_prefix}_gateway"
+    gateway_trade_intent = paired_live_trade_intent(
+        exchange_id="hibachi",
+        account_alias=gateway_account_alias,
+        strategy_id="hibachi_live_roundtrip",
+        market=assignment.market,
+        roundtrip_mode=gateway_roundtrip_mode,
+        quantity=quantity,
+        buy_reference_price=Decimal(str(snapshot.best_ask.price)),
+        sell_reference_price=Decimal(str(snapshot.best_bid.price)),
+        buy_order_type=OrderKind.MARKET,
+        sell_order_type=OrderKind.MARKET,
+        max_gross_notional_usd=max(args.target_gross_volume_usd, notional * Decimal("2")),
+        metadata={
+            "spread_bps": str(snapshot.spread_bps),
+            "planned_gross_volume_usd": str(notional * Decimal("2")),
+            "entry_mode": args.entry_mode,
+            "close_mode": args.close_mode,
+        },
+        buy_metadata={"source": "hibachi_live_roundtrip"},
+        sell_metadata={"source": "hibachi_live_roundtrip"},
+    )
+    fee_bps = args.max_fees_percent * Decimal("10000")
+    gateway = build_live_preflight_gateway(
+        exchange_id="hibachi",
+        account_alias=gateway_account_alias,
+        market=assignment.market,
+        adapter_factory=lambda: _hibachi_gateway_adapter(args.credential_prefix, args.max_fees_percent),
+        entry_fee_bps=fee_bps,
+        exit_fee_bps=fee_bps,
+        fee_source="hibachi_max_fees_percent_conservative",
+        max_order_notional_usd=args.max_notional_usd + Decimal("1"),
+        max_gross_notional_usd=max(args.target_gross_volume_usd, notional * Decimal("2")),
+        open_orders_supported=True,
+        live_orders_enabled=args.execute_live,
+    )
+    gateway_include_read_only = args.execute_live
+    print(f"gateway_read_only_checks_enabled={gateway_include_read_only}")
+    gateway_preflight = run_live_gateway_preflight(
+        gateway=gateway,
+        trade_intent=gateway_trade_intent,
+        request_id="hibachi-live-roundtrip-gateway-preflight",
+        include_read_only=gateway_include_read_only,
+    )
+    if not gateway_preflight.ready:
+        print("live_ready=False")
+        print("reason=gateway_preflight_not_ready")
+        return
+
     if not args.execute_live:
         print(f"live_skipped=pass_--execute-live_and_--confirm_{CONFIRM_TEXT}")
         return
@@ -288,6 +346,13 @@ def main() -> None:
         account_id=credentials["account_id"],
         private_key=credentials["private_key"],
     )
+    client = GatewayLiveActionProxy(
+        target=client,
+        gateway=gateway,
+        trade_intent=gateway_trade_intent,
+        request_id_prefix="hibachi-live-roundtrip-gateway-submit",
+    )
+    print("live_submit_route=execution_gateway_live_action_proxy")
 
     start_direction, start_qty = _position_state(client.get_account_info(), assignment.market)
     print(f"start_position_direction={start_direction or 'flat'}")
@@ -415,6 +480,25 @@ def _enabled_assignment(config: object, market: str) -> object:
     if len(matches) != 1:
         raise SystemExit(f"expected exactly one enabled Hibachi market-market assignment for {market}")
     return matches[0]
+
+
+def _gateway_roundtrip_mode(args: argparse.Namespace) -> RoundtripMode:
+    if args.fast_close_on_fill:
+        return RoundtripMode.FAST_REDUCE_ONLY
+    if args.entry_mode == "paired-market-batch":
+        return RoundtripMode.NETTING
+    if args.close_mode == "immediate-reduce-only":
+        return RoundtripMode.FAST_REDUCE_ONLY
+    return RoundtripMode.CONFIRMED
+
+
+def _hibachi_gateway_adapter(credential_prefix: str, max_fees_percent: Decimal):
+    from perpdex_farming_bot.exchanges.hibachi import HibachiAdapter
+
+    return HibachiAdapter(
+        credential_prefix=credential_prefix,
+        max_fees_percent=max_fees_percent,
+    )
 
 
 def _run_live_volume_loop(

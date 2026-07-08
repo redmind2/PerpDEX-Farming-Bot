@@ -26,6 +26,7 @@ from perpdex_farming_bot.connectors.hyperliquid_readonly import (
     validate_https_base_url,
 )
 from perpdex_farming_bot.core.execution_event import ExecutionEvent, emit_execution_event
+from perpdex_farming_bot.core.execution_models import OrderKind, RoundtripMode
 from perpdex_farming_bot.core.live_volume import RoundtripPlan, VolumeRunConfig, run_paired_volume
 from perpdex_farming_bot.credentials import (
     hyperliquid_available_private_readonly_env,
@@ -36,6 +37,12 @@ from perpdex_farming_bot.credentials import (
 from perpdex_farming_bot.env import get_env, load_dotenv_if_present, masked_env_status
 from perpdex_farming_bot.exchanges.base import ExchangeOrderResult
 from perpdex_farming_bot.exchanges.hyperliquid import HyperliquidAdapter
+from perpdex_farming_bot.gateway.live_preflight import (
+    build_live_preflight_gateway,
+    paired_live_trade_intent,
+    run_live_gateway_preflight,
+)
+from perpdex_farming_bot.gateway.roundtrip_adapter import GatewayRoundtripAdapter
 from perpdex_farming_bot.exchanges.hyperliquid_fees import load_hyperliquid_account_fee
 from perpdex_farming_bot.marketdata.hyperliquid import (
     HyperliquidMarketInfo,
@@ -290,6 +297,60 @@ def main() -> None:
     print(f"initial_selected_spread_bps={selected.spread_bps:.4f}")
     print(f"initial_selected_planned_gross_volume_usd={selected.planned_gross_volume_usd:.4f}")
 
+    gateway_account_alias = f"{credential_env.prefix}_gateway"
+    gateway_trade_intent = paired_live_trade_intent(
+        exchange_id="hyperliquid",
+        account_alias=gateway_account_alias,
+        strategy_id="hyperliquid_live_volume",
+        market=selected.config.api_coin,
+        roundtrip_mode=RoundtripMode(args.roundtrip_mode),
+        quantity=selected.size,
+        buy_price=selected.aggressive_buy_px,
+        sell_price=selected.aggressive_sell_px,
+        buy_reference_price=selected.best_ask,
+        sell_reference_price=selected.best_bid,
+        buy_order_type=OrderKind.LIMIT,
+        sell_order_type=OrderKind.LIMIT,
+        time_in_force="ioc",
+        max_gross_notional_usd=target_gross,
+        metadata={
+            "display_market": selected.config.display_market,
+            "spread_bps": str(selected.spread_bps),
+            "planned_gross_volume_usd": str(selected.planned_gross_volume_usd),
+        },
+        buy_metadata={"source": "hyperliquid_live_volume"},
+        sell_metadata={"source": "hyperliquid_live_volume"},
+    )
+    gateway = build_live_preflight_gateway(
+        exchange_id="hyperliquid",
+        account_alias=gateway_account_alias,
+        market=selected.config.api_coin,
+        adapter_factory=lambda: HyperliquidAdapter(
+            api_endpoint=api_endpoint,
+            credential_prefix=args.credential_prefix,
+            environment=environment,
+            timeout_seconds=args.timeout_seconds,
+            perp_dexs=tuple(perp_dexs),
+            allow_live_orders=False,
+        ),
+        entry_fee_bps=account_fee_bps,
+        exit_fee_bps=account_fee_bps,
+        fee_source="hyperliquid_account_user_fees",
+        max_order_notional_usd=max_leg_notional * (Decimal("1") + slippage_bps / Decimal("10000")) + Decimal("1"),
+        max_gross_notional_usd=target_gross,
+        open_orders_supported=True,
+    )
+    gateway_preflight = run_live_gateway_preflight(
+        gateway=gateway,
+        trade_intent=gateway_trade_intent,
+        request_id="hyperliquid-live-volume-gateway-preflight",
+        include_read_only=True,
+    )
+    if not gateway_preflight.ready:
+        print("live_ready=False")
+        print("reason=gateway_preflight_not_ready")
+        return
+
     if not args.execute_live:
         print("live_ready=True")
         print(f"live_skipped=pass_--execute-live_and_--confirm_{CONFIRM_TEXT}")
@@ -303,7 +364,7 @@ def main() -> None:
         print("reason=adapter_allow_live_orders_config_false")
         return
 
-    adapter = HyperliquidAdapter(
+    live_exchange_adapter = HyperliquidAdapter(
         api_endpoint=api_endpoint,
         credential_prefix=args.credential_prefix,
         environment=environment,
@@ -312,13 +373,33 @@ def main() -> None:
         allow_live_orders=allow_live_orders,
         max_roundtrip_gross_volume_usd=(max_leg_notional * Decimal("2")) + Decimal("5"),
     )
-    adapter_signer_ready, adapter_signer_status = adapter.signer_ready()
+    adapter_signer_ready, adapter_signer_status = live_exchange_adapter.signer_ready()
     print(f"adapter_signer_ready={adapter_signer_ready}")
     print(f"adapter_signer_status={adapter_signer_status}")
     if not adapter_signer_ready:
         print("live_ready=False")
         print("reason=adapter_signer_not_ready")
         return
+    live_gateway = build_live_preflight_gateway(
+        exchange_id="hyperliquid",
+        account_alias=gateway_account_alias,
+        market=selected.config.api_coin,
+        adapter_factory=lambda: live_exchange_adapter,
+        entry_fee_bps=account_fee_bps,
+        exit_fee_bps=account_fee_bps,
+        fee_source="hyperliquid_account_user_fees",
+        max_order_notional_usd=max_leg_notional * (Decimal("1") + slippage_bps / Decimal("10000")) + Decimal("1"),
+        max_gross_notional_usd=target_gross,
+        open_orders_supported=True,
+        live_orders_enabled=True,
+    )
+    adapter = GatewayRoundtripAdapter(
+        gateway=live_gateway,
+        exchange_id="hyperliquid",
+        account_alias=gateway_account_alias,
+        request_id_prefix="hyperliquid-live-volume-gateway-submit",
+    )
+    print("live_submit_route=execution_gateway_roundtrip_adapter")
 
     run_start_monotonic = time.perf_counter()
     fills_start_ms = int(time.time() * 1000) - 2000

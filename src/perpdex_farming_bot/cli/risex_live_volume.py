@@ -51,6 +51,7 @@ from perpdex_farming_bot.core.execution_event import (
     emit_execution_event,
     estimate_roundtrip_fee_usd,
 )
+from perpdex_farming_bot.core.execution_models import ExecutionRequest, OrderKind, RoundtripMode
 from perpdex_farming_bot.env import get_env, load_dotenv_if_present, masked_env_status
 from perpdex_farming_bot.exchanges.base import AdapterError
 from perpdex_farming_bot.exchanges.risex import RisexAdapter
@@ -61,6 +62,12 @@ from perpdex_farming_bot.exchanges.risex_fees import (
     risex_fee_overrides_from_config,
     risex_market_fee_metadata_from_markets,
 )
+from perpdex_farming_bot.gateway.live_preflight import (
+    build_live_preflight_gateway,
+    paired_live_trade_intent,
+    run_live_gateway_preflight,
+)
+from perpdex_farming_bot.gateway.live_action import GatewayLiveActionProxy
 
 
 MAX_LIVE_TARGET_USD = Decimal("1000")
@@ -306,6 +313,59 @@ def main() -> None:
             print("volume_ready=False")
             return
 
+    gateway_roundtrip_mode = _gateway_roundtrip_mode(args.close_mode)
+    gateway_account_alias = f"{credential_env.prefix}_gateway"
+    gateway_trade_intent = paired_live_trade_intent(
+        exchange_id="risex",
+        account_alias=gateway_account_alias,
+        strategy_id="risex_live_volume",
+        market=str(dry_plan.market.market_id),
+        roundtrip_mode=gateway_roundtrip_mode,
+        quantity=dry_plan.size,
+        buy_reference_price=dry_plan.best_ask,
+        sell_reference_price=dry_plan.best_bid,
+        buy_order_type=OrderKind.MARKET,
+        sell_order_type=OrderKind.MARKET,
+        max_gross_notional_usd=args.target_gross_volume_usd,
+        metadata={
+            "market_name": dry_plan.market.name,
+            "spread_bps": str(dry_plan.spread_bps),
+            "planned_gross_volume_usd": str(dry_plan.estimated_roundtrip_notional),
+        },
+        buy_metadata={"source": "risex_live_volume"},
+        sell_metadata={"source": "risex_live_volume"},
+    )
+    gateway = build_live_preflight_gateway(
+        exchange_id="risex",
+        account_alias=gateway_account_alias,
+        market=str(dry_plan.market.market_id),
+        adapter_factory=lambda: RisexAdapter(
+            api_endpoint=api_endpoint,
+            credential_prefix=args.credential_prefix,
+            environment=environment,
+            timeout_seconds=args.timeout_seconds,
+            allow_live_orders=False,
+        ),
+        entry_fee_bps=dry_plan.entry_fee_bps,
+        exit_fee_bps=dry_plan.exit_fee_bps,
+        fee_source=dry_plan.fee_source,
+        max_order_notional_usd=args.max_leg_notional_usd + Decimal("1"),
+        max_gross_notional_usd=args.target_gross_volume_usd,
+        slippage_buffer_bps=dry_plan.slippage_buffer_bps,
+        open_orders_supported=True,
+        live_orders_enabled=args.execute_live,
+    )
+    gateway_preflight = run_live_gateway_preflight(
+        gateway=gateway,
+        trade_intent=gateway_trade_intent,
+        request_id="risex-live-volume-gateway-preflight",
+        include_read_only=True,
+    )
+    if not gateway_preflight.ready:
+        print("volume_ready=False")
+        print("reason=gateway_preflight_not_ready")
+        return
+
     if not args.execute_live:
         _emit_dry_run_execution_event(
             environment=environment,
@@ -330,6 +390,13 @@ def main() -> None:
         timeout_seconds=args.timeout_seconds,
         allow_live_orders=True,
     )
+    live_adapter = GatewayLiveActionProxy(
+        target=live_adapter,
+        gateway=gateway,
+        trade_intent=gateway_trade_intent,
+        request_id_prefix="risex-live-volume-gateway-submit",
+    )
+    print("live_submit_route=execution_gateway_live_action_proxy")
     _run_volume_loop(
         api_endpoint=api_endpoint,
         credentials=credentials,
@@ -338,6 +405,8 @@ def main() -> None:
         fee_provider=fee_provider,
         environment=environment,
         account_label=credential_env.prefix,
+        gateway=gateway,
+        gateway_trade_intent=gateway_trade_intent,
         args=args,
     )
 
@@ -376,6 +445,14 @@ def _normalize_close_mode_args(args: argparse.Namespace) -> None:
         args.fast_close_on_fill = True
     if args.close_mode == "netting":
         args.prebuild_close_order = True
+
+
+def _gateway_roundtrip_mode(close_mode: str) -> RoundtripMode:
+    if close_mode == "netting":
+        return RoundtripMode.NETTING
+    if close_mode == "fast-reduce-only":
+        return RoundtripMode.FAST_REDUCE_ONLY
+    return RoundtripMode.CONFIRMED
 
 
 def _parse_market_ids(raw: str) -> tuple[int, ...]:
@@ -523,6 +600,8 @@ def _run_volume_loop(
     fee_provider: RisexFeeProvider,
     environment: str,
     account_label: str,
+    gateway: object,
+    gateway_trade_intent: object,
     args: argparse.Namespace,
 ) -> None:
     total = Decimal("0")
@@ -601,9 +680,12 @@ def _run_volume_loop(
                 signed_entry=signed_entry,
                 signed_close=prebuilt_close,
             )
-            print(f"cycle_{cycle}_entry_post_latency_ms={_elapsed_ms(entry_post.started_ns, entry_post.done_ns)}")
-            print(f"cycle_{cycle}_close_post_latency_ms={_elapsed_ms(close_post.started_ns, close_post.done_ns)}")
-            print(f"cycle_{cycle}_entry_to_close_submit_gap_ms={_elapsed_ms(entry_post.started_ns, close_post.started_ns)}")
+            entry_post_latency_ms = _elapsed_ms(entry_post.started_ns, entry_post.done_ns)
+            close_post_latency_ms = _elapsed_ms(close_post.started_ns, close_post.done_ns)
+            entry_to_close_submit_gap_ms = _elapsed_ms(entry_post.started_ns, close_post.started_ns)
+            print(f"cycle_{cycle}_entry_post_latency_ms={entry_post_latency_ms}")
+            print(f"cycle_{cycle}_close_post_latency_ms={close_post_latency_ms}")
+            print(f"cycle_{cycle}_entry_to_close_submit_gap_ms={entry_to_close_submit_gap_ms}")
             if entry_post.error:
                 print("manual_review_required=True")
                 print("volume_loop_stopped=entry_adapter_error")
@@ -683,7 +765,24 @@ def _run_volume_loop(
             total += plan.estimated_roundtrip_notional
             print(f"cycle_{cycle}_estimated_gross_volume_usd={fmt_decimal(plan.estimated_roundtrip_notional)}")
             print(f"volume_progress_usd={fmt_decimal(total)}")
-            print(f"cycle_{cycle}_total_latency_ms={_elapsed_ms(cycle_started_ns, close_post_done_ns)}")
+            cycle_total_latency_ms = _elapsed_ms(cycle_started_ns, close_post_done_ns)
+            print(f"cycle_{cycle}_total_latency_ms={cycle_total_latency_ms}")
+            emit_execution_event(
+                gateway.record_observation(
+                    ExecutionRequest(
+                        request_id=f"risex-live-volume-cycle-{cycle}-gateway-observation",
+                        trade_intent=gateway_trade_intent,
+                    ),
+                    status="live_roundtrip_submitted",
+                    metadata={
+                        "filled_gross_volume_usd": plan.estimated_roundtrip_notional,
+                        "entry_post_latency_ms": entry_post_latency_ms,
+                        "close_post_latency_ms": close_post_latency_ms,
+                        "entry_to_close_submit_gap_ms": entry_to_close_submit_gap_ms,
+                        "cycle_total_latency_ms": cycle_total_latency_ms,
+                    },
+                )
+            )
             time.sleep(args.loop_delay_seconds)
             continue
 
@@ -696,7 +795,8 @@ def _run_volume_loop(
             print(f"cycle_{cycle}_entry_adapter_error={exc}")
             break
         entry_post_done_ns = _now_ns()
-        print(f"cycle_{cycle}_entry_post_latency_ms={_elapsed_ms(entry_post_started_ns, entry_post_done_ns)}")
+        entry_post_latency_ms = _elapsed_ms(entry_post_started_ns, entry_post_done_ns)
+        print(f"cycle_{cycle}_entry_post_latency_ms={entry_post_latency_ms}")
         _print_post_result(f"cycle_{cycle}_entry", entry_result)
         if not entry_result.ok:
             print("volume_loop_stopped=entry_order_failed")
@@ -773,7 +873,8 @@ def _run_volume_loop(
                 break
 
         print(f"cycle_{cycle}_close_submitting=True")
-        print(f"cycle_{cycle}_entry_to_close_submit_gap_ms={_elapsed_ms(entry_post_done_ns)}")
+        entry_to_close_submit_gap_ms = _elapsed_ms(entry_post_done_ns)
+        print(f"cycle_{cycle}_entry_to_close_submit_gap_ms={entry_to_close_submit_gap_ms}")
         close_post_started_ns = _now_ns()
         try:
             close_result = adapter.submit_signed_place_order(signed_close)
@@ -783,7 +884,8 @@ def _run_volume_loop(
             print(f"cycle_{cycle}_close_adapter_error={exc}")
             break
         close_post_done_ns = _now_ns()
-        print(f"cycle_{cycle}_close_post_latency_ms={_elapsed_ms(close_post_started_ns, close_post_done_ns)}")
+        close_post_latency_ms = _elapsed_ms(close_post_started_ns, close_post_done_ns)
+        print(f"cycle_{cycle}_close_post_latency_ms={close_post_latency_ms}")
         _print_post_result(f"cycle_{cycle}_close", close_result)
         if not close_result.ok:
             print("manual_review_required=True")
@@ -844,7 +946,24 @@ def _run_volume_loop(
         total += plan.estimated_roundtrip_notional
         print(f"cycle_{cycle}_estimated_gross_volume_usd={fmt_decimal(plan.estimated_roundtrip_notional)}")
         print(f"volume_progress_usd={fmt_decimal(total)}")
-        print(f"cycle_{cycle}_total_latency_ms={_elapsed_ms(cycle_started_ns, close_post_done_ns)}")
+        cycle_total_latency_ms = _elapsed_ms(cycle_started_ns, close_post_done_ns)
+        print(f"cycle_{cycle}_total_latency_ms={cycle_total_latency_ms}")
+        emit_execution_event(
+            gateway.record_observation(
+                ExecutionRequest(
+                    request_id=f"risex-live-volume-cycle-{cycle}-gateway-observation",
+                    trade_intent=gateway_trade_intent,
+                ),
+                status="live_roundtrip_submitted",
+                metadata={
+                    "filled_gross_volume_usd": plan.estimated_roundtrip_notional,
+                    "entry_post_latency_ms": entry_post_latency_ms,
+                    "close_post_latency_ms": close_post_latency_ms,
+                    "entry_to_close_submit_gap_ms": entry_to_close_submit_gap_ms,
+                    "cycle_total_latency_ms": cycle_total_latency_ms,
+                },
+            )
+        )
         time.sleep(args.loop_delay_seconds)
 
     if total < args.target_gross_volume_usd and cycle >= args.max_cycles:

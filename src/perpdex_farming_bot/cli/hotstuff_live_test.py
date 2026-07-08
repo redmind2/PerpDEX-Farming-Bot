@@ -32,6 +32,7 @@ from perpdex_farming_bot.core.execution_event import (
     estimate_loss_usd,
     estimate_roundtrip_fee_usd,
 )
+from perpdex_farming_bot.core.execution_models import OrderKind, RoundtripMode
 from perpdex_farming_bot.core.live_volume import RoundtripPlan, VolumeRunConfig, run_paired_volume
 from perpdex_farming_bot.credentials import (
     hotstuff_available_private_readonly_env,
@@ -48,6 +49,13 @@ from perpdex_farming_bot.exchanges.hotstuff_fees import (
     hotstuff_market_fee_metadata_from_instruments,
     load_hotstuff_account_fee,
 )
+from perpdex_farming_bot.gateway.live_preflight import (
+    build_live_preflight_gateway,
+    paired_live_trade_intent,
+    run_live_gateway_preflight,
+)
+from perpdex_farming_bot.gateway.live_action import GatewayLiveActionProxy
+from perpdex_farming_bot.gateway.roundtrip_adapter import GatewayRoundtripAdapter
 from perpdex_farming_bot.marketdata import MarketSpec, RestBackoff, SpreadCache, select_lowest_spread
 from perpdex_farming_bot.marketdata.hotstuff import refresh_hotstuff_spread_cache
 
@@ -297,6 +305,59 @@ def main() -> None:
             sdk_installed=sdk_installed,
         )
 
+    gateway_roundtrip_mode = RoundtripMode.FAST_REDUCE_ONLY if args.fast_close_on_fill else RoundtripMode.NETTING
+    gateway_account_alias = f"{args.credential_prefix}_gateway"
+    gateway_trade_intent = paired_live_trade_intent(
+        exchange_id="hotstuff",
+        account_alias=gateway_account_alias,
+        strategy_id="hotstuff_live_test",
+        market=selected.market,
+        roundtrip_mode=gateway_roundtrip_mode,
+        buy_quantity=buy_qty,
+        sell_quantity=sell_qty,
+        buy_reference_price=buy_price,
+        sell_reference_price=sell_price,
+        buy_order_type=OrderKind.MARKET,
+        sell_order_type=OrderKind.MARKET,
+        max_gross_notional_usd=target_gross_volume,
+        metadata={
+            "instrument_id": selected.instrument_id,
+            "spread_bps": str(selected.live_spread_bps),
+            "planned_gross_volume_usd": str(planned_gross),
+        },
+        buy_metadata={"source": "hotstuff_live_test"},
+        sell_metadata={"source": "hotstuff_live_test"},
+    )
+    gateway = build_live_preflight_gateway(
+        exchange_id="hotstuff",
+        account_alias=gateway_account_alias,
+        market=selected.market,
+        adapter_factory=lambda: HotstuffAdapter(
+            api_endpoint=api_endpoint,
+            credential_prefix=args.credential_prefix,
+            environment=environment,
+            timeout_seconds=args.timeout_seconds,
+        ),
+        entry_fee_bps=selected_cost.entry_fee_bps,
+        exit_fee_bps=selected_cost.exit_fee_bps,
+        fee_source=selected_cost.fee_source,
+        max_order_notional_usd=order_notional + Decimal("1"),
+        max_gross_notional_usd=max(planned_gross, target_gross_volume),
+        slippage_buffer_bps=selected_cost.slippage_buffer_bps,
+        open_orders_supported=True,
+        live_orders_enabled=args.execute_live,
+    )
+    gateway_preflight = run_live_gateway_preflight(
+        gateway=gateway,
+        trade_intent=gateway_trade_intent,
+        request_id="hotstuff-live-test-gateway-preflight",
+        include_read_only=True,
+    )
+    if not gateway_preflight.ready:
+        print("live_ready=False")
+        print("reason=gateway_preflight_not_ready")
+        return
+
     if not args.execute_live:
         print("live_ready=True")
         print(f"live_skipped=pass_--execute-live_and_--confirm_{CONFIRM_TEXT}")
@@ -330,6 +391,8 @@ def main() -> None:
             target_gross_volume=target_gross_volume,
             max_spread_bps=max_spread_bps,
             level_size_fraction=level_size_fraction,
+            gateway=gateway,
+            gateway_trade_intent=gateway_trade_intent,
         )
         return
 
@@ -345,6 +408,8 @@ def main() -> None:
         max_spread_bps=max_spread_bps,
         level_size_fraction=level_size_fraction,
         min_entry_delay_seconds=min_entry_delay_seconds,
+        gateway=gateway,
+        gateway_account_alias=gateway_account_alias,
     )
 
 
@@ -614,6 +679,8 @@ def _execute_live_loop(
     max_spread_bps: Decimal,
     level_size_fraction: Decimal,
     min_entry_delay_seconds: float,
+    gateway: object,
+    gateway_account_alias: str,
 ) -> None:
     adapter = HotstuffAdapter(
         api_endpoint,
@@ -725,8 +792,15 @@ def _execute_live_loop(
             reason="lowest_expected_loss_eligible_market",
         )
 
+    gateway_adapter = GatewayRoundtripAdapter(
+        gateway=gateway,
+        exchange_id="hotstuff",
+        account_alias=gateway_account_alias,
+        request_id_prefix="hotstuff-live-volume-gateway-submit",
+    )
+    print("live_submit_route=execution_gateway_roundtrip_adapter")
     result = run_paired_volume(
-        adapter=adapter,
+        adapter=gateway_adapter,
         config=VolumeRunConfig(
             target_gross_volume_usd=target_gross_volume,
             max_cycles=args.max_cycles,
@@ -750,6 +824,8 @@ def _execute_fast_close_loop(
     target_gross_volume: Decimal,
     max_spread_bps: Decimal,
     level_size_fraction: Decimal,
+    gateway: object,
+    gateway_trade_intent: object,
 ) -> None:
     adapter = HotstuffAdapter(
         api_endpoint,
@@ -763,6 +839,13 @@ def _execute_fast_close_loop(
     if not signer_ready:
         print(f"live_aborted={signer_reason}")
         return
+    adapter = GatewayLiveActionProxy(
+        target=adapter,
+        gateway=gateway,
+        trade_intent=gateway_trade_intent,
+        request_id_prefix="hotstuff-live-fast-gateway-submit",
+    )
+    print("live_submit_route=execution_gateway_live_action_proxy")
 
     print("live_loop_start=True")
     print("live_loop_mode=fast_close_on_fill")

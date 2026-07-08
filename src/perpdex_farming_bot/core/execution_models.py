@@ -191,6 +191,7 @@ class ExecutionPreflightRequest:
     include_read_only: bool = False
     check_positions: bool = True
     check_open_orders: bool = True
+    allow_live_without_submission: bool = True
 
 
 @dataclass(frozen=True)

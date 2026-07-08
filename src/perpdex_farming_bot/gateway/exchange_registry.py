@@ -16,6 +16,7 @@ from perpdex_farming_bot.core.execution_models import (
     OrderExecutionResult,
     OrderIntent,
 )
+from perpdex_farming_bot.exchanges.base import ExchangeOrderResult, PairedRoundtripResult
 from perpdex_farming_bot.core.fee_provider import CommonFeeProvider, MultiExchangeFeeProvider, StaticFeeProvider
 from perpdex_farming_bot.exchanges.base import AdapterError, ExchangeAdapter
 from perpdex_farming_bot.gateway.execution_gateway import ExecutionGateway, StaticKillSwitch
@@ -80,6 +81,50 @@ class LazyExchangeAdapterBridge:
             status=f"{self.exchange_id}_{mode.value}_submit_blocked_gateway_skeleton",
             error="Gateway exchange bridge does not submit live orders in this phase",
             live_order_submitted=False,
+        )
+
+    def execute_paired_notional_roundtrip(
+        self,
+        *,
+        market: str,
+        instrument_id: int,
+        buy_price: Decimal,
+        sell_price: Decimal,
+        buy_size: Decimal,
+        sell_size: Decimal,
+        planned_gross_volume_usd: Decimal,
+        first_side: str = "BUY",
+        second_side: str = "SELL",
+        roundtrip_mode: str = "confirmed",
+    ) -> PairedRoundtripResult:
+        return self._adapter_instance().execute_paired_notional_roundtrip(
+            market=market,
+            instrument_id=instrument_id,
+            buy_price=buy_price,
+            sell_price=sell_price,
+            buy_size=buy_size,
+            sell_size=sell_size,
+            planned_gross_volume_usd=planned_gross_volume_usd,
+            first_side=first_side,
+            second_side=second_side,
+            roundtrip_mode=roundtrip_mode,
+        )
+
+    def close_position_reduce_only(
+        self,
+        *,
+        market: str,
+        instrument_id: int,
+        side: str,
+        price: Decimal,
+        size: Decimal,
+    ) -> ExchangeOrderResult:
+        return self._adapter_instance().close_position_reduce_only(
+            market=market,
+            instrument_id=instrument_id,
+            side=side,
+            price=price,
+            size=size,
         )
 
     def _adapter_instance(self) -> ExchangeAdapter:

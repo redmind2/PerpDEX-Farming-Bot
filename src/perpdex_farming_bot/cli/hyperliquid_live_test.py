@@ -21,7 +21,15 @@ from perpdex_farming_bot.credentials import (
     hyperliquid_signing_missing,
     read_hyperliquid_credentials,
 )
+from perpdex_farming_bot.core.execution_models import ExecutionRequest, OrderKind, RoundtripMode
 from perpdex_farming_bot.env import get_env, load_dotenv_if_present, masked_env_status
+from perpdex_farming_bot.exchanges.hyperliquid import HyperliquidAdapter
+from perpdex_farming_bot.exchanges.hyperliquid_fees import load_hyperliquid_account_fee
+from perpdex_farming_bot.gateway.live_preflight import (
+    build_live_preflight_gateway,
+    paired_live_trade_intent,
+    run_live_gateway_preflight,
+)
 from perpdex_farming_bot.marketdata.hyperliquid import (
     HyperliquidMarketInfo,
     fetch_hyperliquid_rest_top_of_book,
@@ -164,6 +172,45 @@ def main() -> None:
         print("live_ready=False")
         return
 
+    try:
+        account_fee = load_hyperliquid_account_fee(api_endpoint, credentials["account_address"], args.timeout_seconds)
+    except Exception as exc:
+        print("live_ready=False")
+        print(f"account_fee_error={exc.__class__.__name__}")
+        return
+    print(f"account_taker_fee_bps={fmt_decimal(account_fee.taker_fee_bps)}")
+
+    gateway_account_alias = f"{credential_env.prefix}_gateway"
+    gateway_trade_intent = _gateway_trade_intent_from_plan(
+        initial_plan,
+        account_alias=gateway_account_alias,
+        max_gross_notional_usd=args.max_notional_usd * Decimal("2"),
+    )
+    gateway = _build_hyperliquid_gateway(
+        api_endpoint=api_endpoint,
+        credential_prefix=args.credential_prefix,
+        environment=environment,
+        dex=args.dex,
+        account_alias=gateway_account_alias,
+        market=initial_plan.coin,
+        fee_bps=account_fee.taker_fee_bps,
+        max_order_notional_usd=args.max_notional_usd + Decimal("1"),
+        max_gross_notional_usd=args.max_notional_usd * Decimal("2"),
+        timeout_seconds=args.timeout_seconds,
+        allow_live_orders=False,
+        live_orders_enabled=False,
+    )
+    gateway_preflight = run_live_gateway_preflight(
+        gateway=gateway,
+        trade_intent=gateway_trade_intent,
+        request_id="hyperliquid-live-test-gateway-preflight",
+        include_read_only=True,
+    )
+    if not gateway_preflight.ready:
+        print("live_ready=False")
+        print("reason=gateway_preflight_not_ready")
+        return
+
     if not args.execute_live:
         print("live_ready=True")
         print(f"live_skipped=pass_--execute-live_and_--confirm_{CONFIRM_TEXT}")
@@ -178,61 +225,46 @@ def main() -> None:
         print("live_aborted=fresh_orderbook_verify_failed")
         return
 
-    print("live_entry_submitting=True")
     order_start = time.perf_counter()
-    entry_start = time.perf_counter()
-    try:
-        entry_result = exchange.order(
-            fresh_plan.coin,
-            True,
-            float(fresh_plan.size),
-            float(fresh_plan.aggressive_buy_px),
-            {"limit": {"tif": "Ioc"}},
-            reduce_only=False,
-        )
-    except Exception as exc:
-        print("live_aborted=entry_order_exception")
-        print(f"entry_error_type={exc.__class__.__name__}")
-        return
-    entry_elapsed_ms = (time.perf_counter() - entry_start) * 1000
-    entry_fill = _parse_single_order_fill(entry_result)
-    _print_order_result("entry", entry_result, entry_fill, entry_elapsed_ms)
-    if not entry_fill.ok or entry_fill.filled_size <= 0:
-        print("live_aborted=entry_not_filled")
-        return
-
-    close_plan = _build_and_print_plan(api_endpoint, args, "close_fresh", close_size=entry_fill.filled_size)
-    if close_plan is None or not close_plan.eligible:
-        print("manual_review_required=True")
-        print("reason=close_orderbook_verify_failed")
-        return
-
-    print("live_close_submitting=True")
-    close_start = time.perf_counter()
-    try:
-        close_result = exchange.order(
-            close_plan.coin,
-            False,
-            float(entry_fill.filled_size),
-            float(close_plan.aggressive_sell_px),
-            {"limit": {"tif": "Ioc"}},
-            reduce_only=True,
-        )
-    except Exception as exc:
-        print("manual_review_required=True")
-        print("live_aborted=close_order_exception")
-        print(f"close_error_type={exc.__class__.__name__}")
-        return
-    close_elapsed_ms = (time.perf_counter() - close_start) * 1000
+    live_gateway = _build_hyperliquid_gateway(
+        api_endpoint=api_endpoint,
+        credential_prefix=args.credential_prefix,
+        environment=environment,
+        dex=args.dex,
+        account_alias=gateway_account_alias,
+        market=fresh_plan.coin,
+        fee_bps=account_fee.taker_fee_bps,
+        max_order_notional_usd=args.max_notional_usd + Decimal("1"),
+        max_gross_notional_usd=args.max_notional_usd * Decimal("2"),
+        timeout_seconds=args.timeout_seconds,
+        allow_live_orders=True,
+        live_orders_enabled=True,
+    )
+    print("live_submit_route=execution_gateway_roundtrip_adapter")
+    result = live_gateway.execute_paired_roundtrip(
+        ExecutionRequest(
+            request_id="hyperliquid-live-test-gateway-submit",
+            trade_intent=_gateway_trade_intent_from_plan(
+                fresh_plan,
+                account_alias=gateway_account_alias,
+                max_gross_notional_usd=args.max_notional_usd * Decimal("2"),
+            ),
+        ),
+        instrument_id=fresh_plan.market_info.asset_id,
+        first_side="BUY",
+        second_side="SELL",
+    )
     roundtrip_elapsed_ms = (time.perf_counter() - order_start) * 1000
-    close_fill = _parse_single_order_fill(close_result)
-    _print_order_result("close", close_result, close_fill, close_elapsed_ms)
+    _print_exchange_order_result("entry", result.buy_result)
+    _print_exchange_order_result("close", result.sell_result)
+    print(f"gateway_roundtrip_success={result.success}")
+    print(f"gateway_roundtrip_status={result.status}")
     print(f"roundtrip_order_elapsed_ms={roundtrip_elapsed_ms:.2f}")
 
     if args.final_state_delay_seconds:
         time.sleep(float(args.final_state_delay_seconds))
     final_ok = _print_private_state(info, credentials["account_address"], args.dex, "final")
-    if close_fill.ok and close_fill.filled_size >= entry_fill.filled_size and final_ok:
+    if result.success and final_ok:
         print("live_test_status=closed_flat_or_not_detected")
     else:
         print("live_test_status=position_or_close_fill_manual_review_required")
@@ -257,6 +289,94 @@ def _validate_args(args: argparse.Namespace) -> None:
         raise SystemExit("--timeout-seconds must be greater than zero")
     if args.final_state_delay_seconds < 0:
         raise SystemExit("--final-state-delay-seconds must be zero or greater")
+
+
+def _gateway_trade_intent_from_plan(
+    plan: TinyOrderPlan,
+    *,
+    account_alias: str,
+    max_gross_notional_usd: Decimal,
+):
+    return paired_live_trade_intent(
+        exchange_id="hyperliquid",
+        account_alias=account_alias,
+        strategy_id="hyperliquid_live_test",
+        market=plan.coin,
+        roundtrip_mode=RoundtripMode.CONFIRMED,
+        quantity=plan.size,
+        buy_price=plan.aggressive_buy_px,
+        sell_price=plan.aggressive_sell_px,
+        buy_reference_price=plan.best_ask,
+        sell_reference_price=plan.best_bid,
+        buy_order_type=OrderKind.LIMIT,
+        sell_order_type=OrderKind.LIMIT,
+        time_in_force="ioc",
+        max_gross_notional_usd=max_gross_notional_usd,
+        metadata={
+            "spread_bps": str(plan.spread_bps),
+            "planned_gross_volume_usd": str(plan.one_side_notional_usd * Decimal("2")),
+        },
+        buy_metadata={"source": "hyperliquid_live_test"},
+        sell_metadata={"source": "hyperliquid_live_test"},
+    )
+
+
+def _build_hyperliquid_gateway(
+    *,
+    api_endpoint: str,
+    credential_prefix: str,
+    environment: str,
+    dex: str,
+    account_alias: str,
+    market: str,
+    fee_bps: Decimal,
+    max_order_notional_usd: Decimal,
+    max_gross_notional_usd: Decimal,
+    timeout_seconds: float,
+    allow_live_orders: bool,
+    live_orders_enabled: bool,
+):
+    return build_live_preflight_gateway(
+        exchange_id="hyperliquid",
+        account_alias=account_alias,
+        market=market,
+        adapter_factory=lambda: HyperliquidAdapter(
+            api_endpoint=api_endpoint,
+            credential_prefix=credential_prefix,
+            environment=environment,
+            timeout_seconds=timeout_seconds,
+            dex=dex,
+            perp_dexs=(dex,) if dex else (),
+            allow_live_orders=allow_live_orders,
+            max_roundtrip_gross_volume_usd=max_gross_notional_usd + Decimal("5"),
+        ),
+        entry_fee_bps=fee_bps,
+        exit_fee_bps=fee_bps,
+        fee_source="hyperliquid_account_user_fees",
+        max_order_notional_usd=max_order_notional_usd,
+        max_gross_notional_usd=max_gross_notional_usd,
+        open_orders_supported=True,
+        live_orders_enabled=live_orders_enabled,
+    )
+
+
+def _print_exchange_order_result(label: str, result: object | None) -> None:
+    if result is None:
+        print(f"{label}_result_present=False")
+        return
+    print(f"{label}_result_present=True")
+    print(f"{label}_success={getattr(result, 'success', False)}")
+    print(f"{label}_status={getattr(result, 'status', 'unknown')}")
+    print(f"{label}_filled_size={getattr(result, 'filled_size', Decimal('0'))}")
+    average_price = getattr(result, "average_price", None)
+    if average_price is not None:
+        print(f"{label}_average_price={average_price}")
+    order_id = getattr(result, "exchange_order_id", None)
+    if order_id:
+        print(f"{label}_order_id={order_id}")
+    error = getattr(result, "error", "")
+    if error:
+        print(f"{label}_error={error}")
 
 
 def _build_sdk_clients(api_endpoint: str, credentials: dict[str, str], args: argparse.Namespace):

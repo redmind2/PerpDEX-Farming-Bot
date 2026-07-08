@@ -25,6 +25,14 @@ from perpdex_farming_bot.credentials import (
 )
 from perpdex_farming_bot.env import get_env, load_dotenv_if_present, masked_env_status
 from perpdex_farming_bot.core.execution_event import ExecutionEvent, emit_execution_event
+from perpdex_farming_bot.core.execution_models import ExecutionRequest, OrderKind, RoundtripMode
+from perpdex_farming_bot.exchanges.lighter import LighterAdapter
+from perpdex_farming_bot.gateway.live_preflight import (
+    build_live_preflight_gateway,
+    paired_live_trade_intent,
+    run_live_gateway_preflight,
+)
+from perpdex_farming_bot.gateway.live_action import GatewayLiveActionProxy
 from perpdex_farming_bot.marketdata.lighter import (
     LighterMarketMetadata,
     fetch_lighter_rest_top_of_book,
@@ -235,6 +243,66 @@ async def _run(args: argparse.Namespace) -> None:
             print("live_ready=False")
             return
 
+        gateway_fee_bps = _fee_bps_from_percent(initial_plan.taker_fee_percent)
+        if gateway_fee_bps is None:
+            print("live_ready=False")
+            print("reason=gateway_fee_unknown")
+            return
+        gateway_roundtrip_mode = _gateway_roundtrip_mode(args.close_mode)
+        gateway_account_alias = f"{credential_env.prefix}_gateway"
+        gateway_market = f"{initial_plan.symbol}-PERP"
+        gateway_trade_intent = paired_live_trade_intent(
+            exchange_id="lighter",
+            account_alias=gateway_account_alias,
+            strategy_id="lighter_live_test",
+            market=gateway_market,
+            roundtrip_mode=gateway_roundtrip_mode,
+            quantity=initial_plan.planned_size,
+            buy_reference_price=initial_plan.best_ask,
+            sell_reference_price=initial_plan.best_bid,
+            buy_order_type=OrderKind.MARKET,
+            sell_order_type=OrderKind.MARKET,
+            max_gross_notional_usd=initial_plan.planned_one_side_notional_usd * Decimal("2"),
+            metadata={
+                "market_id": initial_plan.market_id,
+                "spread_bps": str(initial_plan.spread_bps),
+                "planned_gross_volume_usd": str(initial_plan.planned_one_side_notional_usd * Decimal("2")),
+            },
+            buy_metadata={"source": "lighter_live_test"},
+            sell_metadata={"source": "lighter_live_test"},
+        )
+        gateway = build_live_preflight_gateway(
+            exchange_id="lighter",
+            account_alias=gateway_account_alias,
+            market=gateway_market,
+            adapter_factory=lambda: LighterAdapter(
+                api_endpoint=api_endpoint,
+                credential_prefix=args.credential_prefix,
+                environment=environment,
+                timeout_seconds=args.timeout_seconds,
+                allow_live_orders=False,
+            ),
+            entry_fee_bps=gateway_fee_bps,
+            exit_fee_bps=gateway_fee_bps,
+            fee_source="lighter_market_metadata_percentage_taker_fee",
+            max_order_notional_usd=args.max_notional_usd + Decimal("1"),
+            max_gross_notional_usd=max(initial_plan.planned_one_side_notional_usd * Decimal("2"), args.max_notional_usd * Decimal("2")),
+            open_orders_supported=True,
+            live_orders_enabled=args.execute_live,
+        )
+        gateway_include_read_only = bool(get_env(credential_env.read_only_auth_token))
+        print(f"gateway_read_only_checks_enabled={gateway_include_read_only}")
+        gateway_preflight = run_live_gateway_preflight(
+            gateway=gateway,
+            trade_intent=gateway_trade_intent,
+            request_id="lighter-live-test-gateway-preflight",
+            include_read_only=gateway_include_read_only,
+        )
+        if not gateway_preflight.ready:
+            print("live_ready=False")
+            print("reason=gateway_preflight_not_ready")
+            return
+
         if not args.execute_live:
             print("live_ready=True")
             print(f"live_skipped=pass_--execute-live_and_--confirm_{CONFIRM_TEXT}")
@@ -244,8 +312,17 @@ async def _run(args: argparse.Namespace) -> None:
             print("live_skipped=confirmation_mismatch")
             return
 
+        live_signer = GatewayLiveActionProxy(
+            target=signer,
+            gateway=gateway,
+            trade_intent=gateway_trade_intent,
+            request_id_prefix="lighter-live-test-gateway-submit",
+        )
+        print("live_submit_route=execution_gateway_live_action_proxy")
         await _execute_live_roundtrip(
-            signer=signer,
+            signer=live_signer,
+            gateway=gateway,
+            gateway_trade_intent=gateway_trade_intent,
             api_endpoint=api_endpoint,
             account_index=account_index,
             api_key_index=api_key_index,
@@ -260,6 +337,8 @@ async def _run(args: argparse.Namespace) -> None:
 async def _execute_live_roundtrip(
     *,
     signer: Any,
+    gateway: object,
+    gateway_trade_intent: object,
     api_endpoint: str,
     account_index: int,
     api_key_index: int,
@@ -496,6 +575,28 @@ async def _execute_live_roundtrip(
             matched_trade_fee_usd_estimate=_optional_decimal_value(trade_summary["matched_trade_fee_usd_estimate"]),
         )
     )
+    emit_execution_event(
+        gateway.record_observation(
+            ExecutionRequest(
+                request_id="lighter-live-test-gateway-observation",
+                trade_intent=gateway_trade_intent,
+            ),
+            status="closed_flat" if final_all_flat else "position_or_open_order_remains_manual_review_required",
+            metadata={
+                "filled_gross_volume_usd": _optional_decimal_value(trade_summary["matched_trade_gross_usd"]),
+                "final_position_count": 0 if final_amount == 0 else 1,
+                "final_open_order_count": final_state.open_order_count,
+                "final_all_flat": final_all_flat,
+                "entry_post_latency_ms": entry_summary.elapsed_ms,
+                "close_post_latency_ms": close_summary.elapsed_ms,
+                "cycle_total_latency_ms": roundtrip_order_elapsed_ms,
+                "matched_trade_count": int(trade_summary["matched_trade_count"]),
+                "matched_trade_gross_usd": _optional_decimal_value(trade_summary["matched_trade_gross_usd"]),
+                "matched_trade_fee_usd_estimate": _optional_decimal_value(trade_summary["matched_trade_fee_usd_estimate"]),
+            },
+            error_reason=None if final_all_flat else "position_or_open_order_remains_manual_review_required",
+        )
+    )
     if final_all_flat:
         print("final_all_flat=True")
         print("live_test_status=closed_flat")
@@ -617,6 +718,20 @@ def _validate_args(args: argparse.Namespace) -> None:
         raise SystemExit("--trade-poll-delay-seconds must be zero or greater")
     if args.optimistic_close_delay_seconds < 0 or args.optimistic_close_delay_seconds > 2:
         raise SystemExit("--optimistic-close-delay-seconds must be >= 0 and <= 2")
+
+
+def _fee_bps_from_percent(value: Decimal | None) -> Decimal | None:
+    if value is None:
+        return None
+    return value * Decimal("100")
+
+
+def _gateway_roundtrip_mode(close_mode: str) -> RoundtripMode:
+    if close_mode == "netting":
+        return RoundtripMode.NETTING
+    if close_mode == "optimistic":
+        return RoundtripMode.FAST_REDUCE_ONLY
+    return RoundtripMode.CONFIRMED
 
 
 def _build_signer(*, api_endpoint: str, account_index: int, api_key_index: int, api_private_key: str) -> Any:

@@ -34,6 +34,7 @@ from perpdex_farming_bot.connectors.hibachi_readonly import (
 )
 from perpdex_farming_bot.connectors.hibachi_sdk_public import load_hibachi_orderbook_snapshot
 from perpdex_farming_bot.core import MarketCostInput, MarketCostResult, RoundtripPlan, calculate_market_cost, execute_roundtrip_plan
+from perpdex_farming_bot.core.execution_models import OrderKind, RoundtripMode
 from perpdex_farming_bot.credentials import (
     hibachi_available_credential_env,
     hibachi_missing_required,
@@ -43,6 +44,13 @@ from perpdex_farming_bot.env import get_env, load_dotenv_if_present
 from perpdex_farming_bot.marketdata import MarketSpec, RestBackoff, SpreadCache
 from perpdex_farming_bot.marketdata.hibachi import refresh_hibachi_spread_cache
 from perpdex_farming_bot.exchanges.hibachi import HibachiAdapter
+from perpdex_farming_bot.gateway.live_preflight import (
+    build_live_preflight_gateway,
+    paired_live_trade_intent,
+    run_live_gateway_preflight,
+)
+from perpdex_farming_bot.gateway.live_action import GatewayLiveActionProxy
+from perpdex_farming_bot.gateway.roundtrip_adapter import GatewayRoundtripAdapter
 from perpdex_farming_bot.security.secrets import assert_no_plaintext_secrets
 from perpdex_farming_bot.storage import LIVE_RUN_EVENT_COLUMNS, WeeklyLedger
 
@@ -1237,10 +1245,43 @@ def _run_live_phase(
         )
 
         print(f"phase={phase_label} cycle={cycle} plan_latency_ms={_elapsed_ms(plan_started_ns)}")
+        gateway_preflight = _run_gateway_roundtrip_preflight(
+            args=args,
+            run=run,
+            snapshot=snapshot,
+            round_plan=round_plan,
+            cost=cost,
+            phase_label=phase_label,
+            cycle=cycle,
+            round_gross_volume=round_gross_volume,
+        )
+        if not gateway_preflight.ready:
+            print(f"phase={phase_label} cycle={cycle} live_skipped=gateway_preflight_not_ready")
+            print(f"phase={phase_label} stop_reason={gateway_preflight.status}")
+            return live_gross_volume
+        live_gateway, live_trade_intent = _build_gateway_roundtrip_context(
+            args=args,
+            run=run,
+            snapshot=snapshot,
+            round_plan=round_plan,
+            cost=cost,
+            phase_label=phase_label,
+            cycle=cycle,
+            round_gross_volume=round_gross_volume,
+            client=clients[run.wallet.credential_prefix],
+            live_orders_enabled=True,
+        )
         try:
             if args.fast_close_on_fill:
+                cycle_client = GatewayLiveActionProxy(
+                    target=clients[run.wallet.credential_prefix],
+                    gateway=live_gateway,
+                    trade_intent=live_trade_intent,
+                    request_id_prefix=f"hibachi-weekly-{phase_label}-{cycle}-gateway-submit",
+                )
+                print(f"phase={phase_label} cycle={cycle} live_submit_route=execution_gateway_live_action_proxy")
                 result = _execute_fast_close_market_roundtrip(
-                    clients[run.wallet.credential_prefix],
+                    cycle_client,
                     run,
                     args,
                     round_plan.quantity,
@@ -1251,8 +1292,15 @@ def _run_live_phase(
                     plan_latency_already_logged=True,
                 )
             else:
+                cycle_adapter = GatewayRoundtripAdapter(
+                    gateway=live_gateway,
+                    exchange_id="hibachi",
+                    account_alias=f"{run.wallet.credential_prefix}_gateway",
+                    request_id_prefix=f"hibachi-weekly-{phase_label}-{cycle}-gateway-submit",
+                )
+                print(f"phase={phase_label} cycle={cycle} live_submit_route=execution_gateway_roundtrip_adapter")
                 result = execute_roundtrip_plan(
-                    adapters[run.wallet.credential_prefix],
+                    cycle_adapter,
                     RoundtripPlan(
                         market=run.market,
                         instrument_id=0,
@@ -1344,6 +1392,92 @@ def _run_live_phase(
 
     print(f"phase={phase_label} stop_reason=max_cycles_reached:{args.max_cycles_per_phase}")
     return live_gross_volume
+
+
+def _run_gateway_roundtrip_preflight(
+    *,
+    args: argparse.Namespace,
+    run: MarketRun,
+    snapshot: object,
+    round_plan: object,
+    cost: MarketCostResult,
+    phase_label: str,
+    cycle: int,
+    round_gross_volume: Decimal,
+):
+    gateway, trade_intent = _build_gateway_roundtrip_context(
+        args=args,
+        run=run,
+        snapshot=snapshot,
+        round_plan=round_plan,
+        cost=cost,
+        phase_label=phase_label,
+        cycle=cycle,
+        round_gross_volume=round_gross_volume,
+        client=None,
+        live_orders_enabled=False,
+    )
+    return run_live_gateway_preflight(
+        gateway=gateway,
+        trade_intent=trade_intent,
+        request_id=f"hibachi-weekly-{phase_label}-{cycle}-gateway-preflight",
+        include_read_only=True,
+        print_prefix=f"phase_{phase_label}_cycle_{cycle}_gateway",
+    )
+
+
+def _build_gateway_roundtrip_context(
+    *,
+    args: argparse.Namespace,
+    run: MarketRun,
+    snapshot: object,
+    round_plan: object,
+    cost: MarketCostResult,
+    phase_label: str,
+    cycle: int,
+    round_gross_volume: Decimal,
+    client: object | None,
+    live_orders_enabled: bool,
+):
+    account_alias = f"{run.wallet.credential_prefix}_gateway"
+    roundtrip_mode = RoundtripMode.FAST_REDUCE_ONLY if args.fast_close_on_fill else RoundtripMode.NETTING
+    trade_intent = paired_live_trade_intent(
+        exchange_id="hibachi",
+        account_alias=account_alias,
+        strategy_id="hibachi_weekly_live_test",
+        market=run.market,
+        roundtrip_mode=roundtrip_mode,
+        quantity=round_plan.quantity,
+        buy_reference_price=Decimal(str(snapshot.best_ask.price)),
+        sell_reference_price=Decimal(str(snapshot.best_bid.price)),
+        buy_order_type=OrderKind.MARKET,
+        sell_order_type=OrderKind.MARKET,
+        max_gross_notional_usd=round_gross_volume,
+        metadata={
+            "phase": phase_label,
+            "cycle": cycle,
+            "planned_gross_volume_usd": str(round_gross_volume),
+        },
+    )
+    gateway = build_live_preflight_gateway(
+        exchange_id="hibachi",
+        account_alias=account_alias,
+        market=run.market,
+        adapter_factory=lambda: HibachiAdapter(
+            credential_prefix=run.wallet.credential_prefix,
+            max_fees_percent=args.max_fees_percent,
+            client=client,
+        ),
+        entry_fee_bps=cost.entry_fee_bps,
+        exit_fee_bps=cost.exit_fee_bps,
+        fee_source=cost.fee_source,
+        max_order_notional_usd=round_plan.notional_usd + Decimal("1"),
+        max_gross_notional_usd=round_gross_volume,
+        slippage_buffer_bps=cost.slippage_buffer_bps,
+        open_orders_supported=True,
+        live_orders_enabled=live_orders_enabled,
+    )
+    return gateway, trade_intent
 
 
 def _loop_delay_seconds(args: argparse.Namespace) -> float:

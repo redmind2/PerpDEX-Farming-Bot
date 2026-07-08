@@ -37,9 +37,16 @@ from perpdex_farming_bot.credentials import (
     pacifica_credential_env,
     pacifica_signing_missing,
 )
+from perpdex_farming_bot.core.execution_models import OrderKind, RoundtripMode
 from perpdex_farming_bot.env import get_env, load_dotenv_if_present, masked_env_status
 from perpdex_farming_bot.exchanges.base import AdapterError
 from perpdex_farming_bot.exchanges.pacifica import PacificaAdapter
+from perpdex_farming_bot.gateway.live_preflight import (
+    build_live_preflight_gateway,
+    paired_live_trade_intent,
+    run_live_gateway_preflight,
+)
+from perpdex_farming_bot.gateway.live_action import GatewayLiveActionProxy
 
 
 CONFIRM_TEXT = "LIVE_PACIFICA_TINY_MARKET_ROUNDTRIP"
@@ -172,6 +179,23 @@ def main() -> None:
         return
     _print_signed_request_summary("dry_run_entry", signed_entry)
 
+    gateway_preflight = _run_gateway_preflight(
+        api_endpoint=api_endpoint,
+        credential_prefix=args.credential_prefix,
+        environment=environment,
+        account_alias=f"{credential_env.prefix}_gateway",
+        symbol=args.symbol,
+        amount=order_plan.amount,
+        best_bid=order_plan.best_bid,
+        best_ask=order_plan.best_ask,
+        max_notional_usd=args.max_notional_usd,
+        timeout_seconds=args.timeout_seconds,
+    )
+    if not gateway_preflight.ready:
+        print("live_ready=False")
+        print("reason=gateway_preflight_not_ready")
+        return
+
     if not args.execute_live:
         print("live_ready=True")
         print(f"live_skipped=pass_--execute-live_and_--confirm_{CONFIRM_TEXT}")
@@ -206,6 +230,26 @@ def main() -> None:
         timeout_seconds=args.timeout_seconds,
         allow_live_orders=True,
     )
+    live_gateway, live_trade_intent = _build_gateway_context(
+        api_endpoint=api_endpoint,
+        credential_prefix=args.credential_prefix,
+        environment=environment,
+        account_alias=f"{credential_env.prefix}_gateway",
+        symbol=args.symbol,
+        amount=fresh_plan.amount,
+        best_bid=fresh_plan.best_bid,
+        best_ask=fresh_plan.best_ask,
+        max_notional_usd=args.max_notional_usd,
+        timeout_seconds=args.timeout_seconds,
+        live_orders_enabled=True,
+    )
+    live_adapter = GatewayLiveActionProxy(
+        target=live_adapter,
+        gateway=live_gateway,
+        trade_intent=live_trade_intent,
+        request_id_prefix="pacifica-live-test-gateway-submit",
+    )
+    print("live_submit_route=execution_gateway_live_action_proxy")
     print("live_entry_submitting=True")
     try:
         entry_result = live_adapter.submit_signed_order_request(signed_entry)
@@ -287,6 +331,90 @@ def _validate_args(args: argparse.Namespace) -> None:
         raise SystemExit("--position-settle-attempts must be greater than zero")
     if args.position_settle_delay_seconds < 0:
         raise SystemExit("--position-settle-delay-seconds must be zero or greater")
+
+
+def _run_gateway_preflight(
+    *,
+    api_endpoint: str,
+    credential_prefix: str,
+    environment: str,
+    account_alias: str,
+    symbol: str,
+    amount: Decimal,
+    best_bid: Decimal,
+    best_ask: Decimal,
+    max_notional_usd: Decimal,
+    timeout_seconds: float,
+):
+    gateway, trade_intent = _build_gateway_context(
+        api_endpoint=api_endpoint,
+        credential_prefix=credential_prefix,
+        environment=environment,
+        account_alias=account_alias,
+        symbol=symbol,
+        amount=amount,
+        best_bid=best_bid,
+        best_ask=best_ask,
+        max_notional_usd=max_notional_usd,
+        timeout_seconds=timeout_seconds,
+        live_orders_enabled=False,
+    )
+    return run_live_gateway_preflight(
+        gateway=gateway,
+        trade_intent=trade_intent,
+        request_id="pacifica-live-test-gateway-preflight",
+        include_read_only=True,
+    )
+
+
+def _build_gateway_context(
+    *,
+    api_endpoint: str,
+    credential_prefix: str,
+    environment: str,
+    account_alias: str,
+    symbol: str,
+    amount: Decimal,
+    best_bid: Decimal,
+    best_ask: Decimal,
+    max_notional_usd: Decimal,
+    timeout_seconds: float,
+    live_orders_enabled: bool,
+):
+    trade_intent = paired_live_trade_intent(
+        exchange_id="pacifica",
+        account_alias=account_alias,
+        strategy_id="pacifica_live_test",
+        market=symbol,
+        roundtrip_mode=RoundtripMode.CONFIRMED,
+        quantity=amount,
+        buy_reference_price=best_ask,
+        sell_reference_price=best_bid,
+        buy_order_type=OrderKind.MARKET,
+        sell_order_type=OrderKind.MARKET,
+        max_gross_notional_usd=max_notional_usd * Decimal("2"),
+        metadata={"planned_gross_volume_usd": str(max_notional_usd * Decimal("2"))},
+    )
+    gateway = build_live_preflight_gateway(
+        exchange_id="pacifica",
+        account_alias=account_alias,
+        market=symbol,
+        adapter_factory=lambda: PacificaAdapter(
+            api_endpoint=api_endpoint,
+            credential_prefix=credential_prefix,
+            environment=environment,
+            timeout_seconds=timeout_seconds,
+            allow_live_orders=False,
+        ),
+        entry_fee_bps=Decimal("3"),
+        exit_fee_bps=Decimal("3"),
+        fee_source="pacifica_tiny_live_test_conservative_default",
+        max_order_notional_usd=max_notional_usd + Decimal("1"),
+        max_gross_notional_usd=max_notional_usd * Decimal("2"),
+        open_orders_supported=True,
+        live_orders_enabled=live_orders_enabled,
+    )
+    return gateway, trade_intent
 
 
 def _dependencies_ready() -> bool:

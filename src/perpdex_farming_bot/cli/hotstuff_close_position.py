@@ -16,9 +16,12 @@ from perpdex_farming_bot.connectors.hotstuff_readonly import (
     normalize_hotstuff_environment,
     validate_https_base_url,
 )
+from perpdex_farming_bot.core.execution_event import emit_execution_event
+from perpdex_farming_bot.core.execution_models import ExecutionMode, ExecutionRequest, OrderIntent, OrderKind, OrderSide, TradeIntent
 from perpdex_farming_bot.credentials import read_hotstuff_credentials
 from perpdex_farming_bot.env import get_env, load_dotenv_if_present
 from perpdex_farming_bot.exchanges.hotstuff import HotstuffAdapter, hotstuff_close_price, round_down_to_step
+from perpdex_farming_bot.gateway.live_preflight import build_live_preflight_gateway, run_live_gateway_preflight
 
 
 def main() -> None:
@@ -135,9 +138,44 @@ def main() -> None:
         print("reason=rounded_size_zero")
         return
 
-    print("live_submit=True")
-    result = adapter.close_position_reduce_only(
+    gateway_preflight = _run_gateway_close_preflight(
+        api_endpoint=api_endpoint,
+        credential_prefix=args.credential_prefix,
+        environment=environment,
+        account_alias=f"{args.credential_prefix}_gateway",
         market=market,
+        side=side,
+        price=price,
+        size=size,
+        max_notional_usd=abs(size * price) + Decimal("1"),
+        timeout_seconds=args.timeout_seconds,
+    )
+    if not gateway_preflight.ready:
+        print("close_ready=False")
+        print("reason=gateway_preflight_not_ready")
+        return
+
+    print("live_submit=True")
+    live_gateway, live_trade_intent = _build_gateway_close_context(
+        api_endpoint=api_endpoint,
+        credential_prefix=args.credential_prefix,
+        environment=environment,
+        account_alias=f"{args.credential_prefix}_gateway",
+        market=market,
+        side=side,
+        price=price,
+        size=size,
+        max_notional_usd=abs(size * price) + Decimal("1"),
+        timeout_seconds=args.timeout_seconds,
+        live_orders_enabled=True,
+    )
+    print("live_submit_route=execution_gateway_reduce_only_close")
+    live_request = ExecutionRequest(
+        request_id="hotstuff-close-position-gateway-submit",
+        trade_intent=live_trade_intent,
+    )
+    result = live_gateway.execute_reduce_only_close(
+        live_request,
         instrument_id=instrument_id,
         side=side,
         price=price,
@@ -159,6 +197,23 @@ def main() -> None:
     remaining = _find_position(api_endpoint, args.credential_prefix, environment, market, args.timeout_seconds)
     remaining_size = Decimal("0") if remaining is None else Decimal(str(remaining.get("size", "0")))
     print(f"remaining_position_size={remaining_size}")
+    emit_execution_event(
+        live_gateway.record_observation(
+            live_request,
+            status=result.status,
+            metadata={
+                "filled_gross_volume_usd": (
+                    abs(result.filled_size * result.average_price)
+                    if result.average_price is not None and result.filled_size
+                    else None
+                ),
+                "final_position_count": 0 if remaining_size == 0 else 1,
+                "final_all_flat": remaining_size == 0,
+                "order_ids": (result.exchange_order_id,) if result.exchange_order_id else (),
+            },
+            error_reason=None if result.success else result.status,
+        )
+    )
     print("stop_reason=reduce_only_close_submitted")
 
 
@@ -173,6 +228,101 @@ def _find_position(
         if _position_market(position).upper() == market:
             return position
     return None
+
+
+def _run_gateway_close_preflight(
+    *,
+    api_endpoint: str,
+    credential_prefix: str,
+    environment: str,
+    account_alias: str,
+    market: str,
+    side: str,
+    price: Decimal,
+    size: Decimal,
+    max_notional_usd: Decimal,
+    timeout_seconds: float,
+):
+    gateway, trade_intent = _build_gateway_close_context(
+        api_endpoint=api_endpoint,
+        credential_prefix=credential_prefix,
+        environment=environment,
+        account_alias=account_alias,
+        market=market,
+        side=side,
+        price=price,
+        size=size,
+        max_notional_usd=max_notional_usd,
+        timeout_seconds=timeout_seconds,
+        live_orders_enabled=False,
+    )
+    return run_live_gateway_preflight(
+        gateway=gateway,
+        trade_intent=trade_intent,
+        request_id="hotstuff-close-position-gateway-preflight",
+        include_read_only=True,
+        check_positions=False,
+        check_open_orders=True,
+    )
+
+
+def _build_gateway_close_context(
+    *,
+    api_endpoint: str,
+    credential_prefix: str,
+    environment: str,
+    account_alias: str,
+    market: str,
+    side: str,
+    price: Decimal,
+    size: Decimal,
+    max_notional_usd: Decimal,
+    timeout_seconds: float,
+    live_orders_enabled: bool,
+):
+    order_side = OrderSide.BUY if side == "b" else OrderSide.SELL
+    trade_intent = TradeIntent(
+        intent_id="hotstuff-close-position-gateway-trade-1",
+        strategy_id="hotstuff_close_position",
+        account_alias=account_alias,
+        exchange_id="hotstuff",
+        market=market,
+        mode=ExecutionMode.LIVE,
+        orders=(
+            OrderIntent(
+                intent_id="hotstuff-close-position-gateway-order-1",
+                exchange_id="hotstuff",
+                market=market,
+                side=order_side,
+                order_type=OrderKind.MARKET,
+                quantity=size,
+                reference_price=price,
+                reduce_only=True,
+                metadata={"source": "hotstuff_close_position"},
+            ),
+        ),
+        max_gross_notional_usd=max_notional_usd,
+        metadata={"close_position": True},
+    )
+    gateway = build_live_preflight_gateway(
+        exchange_id="hotstuff",
+        account_alias=account_alias,
+        market=market,
+        adapter_factory=lambda: HotstuffAdapter(
+            api_endpoint,
+            credential_prefix,
+            environment,
+            timeout_seconds,
+        ),
+        entry_fee_bps=Decimal("3"),
+        exit_fee_bps=Decimal("3"),
+        fee_source="hotstuff_close_position_conservative_default",
+        max_order_notional_usd=max_notional_usd,
+        max_gross_notional_usd=max_notional_usd,
+        open_orders_supported=True,
+        live_orders_enabled=live_orders_enabled,
+    )
+    return gateway, trade_intent
 
 
 def _confirm_text(market: str) -> str:

@@ -51,9 +51,17 @@ from perpdex_farming_bot.core.execution_cost import (
     calculate_market_cost,
     calculate_sizing,
 )
+from perpdex_farming_bot.core.execution_event import emit_execution_event
+from perpdex_farming_bot.core.execution_models import ExecutionRequest, OrderKind, RoundtripMode
 from perpdex_farming_bot.env import get_env, load_dotenv_if_present, masked_env_status
 from perpdex_farming_bot.exchanges.base import AdapterError
 from perpdex_farming_bot.exchanges.pacifica import PacificaAdapter
+from perpdex_farming_bot.gateway.live_preflight import (
+    build_live_preflight_gateway,
+    paired_live_trade_intent,
+    run_live_gateway_preflight,
+)
+from perpdex_farming_bot.gateway.live_action import GatewayLiveActionProxy
 from perpdex_farming_bot.marketdata.pacifica import fetch_pacifica_rest_top_of_book
 from perpdex_farming_bot.marketdata.spread_monitor import TopOfBook
 
@@ -335,6 +343,59 @@ def main() -> None:
         final_all_flat=None,
     )
 
+    gateway_roundtrip_mode = _gateway_roundtrip_mode(args.close_mode)
+    gateway_account_alias = f"{credential_env.prefix}_gateway"
+    gateway_trade_intent = paired_live_trade_intent(
+        exchange_id="pacifica",
+        account_alias=gateway_account_alias,
+        strategy_id="pacifica_live_volume",
+        market=candidate.config.display_market,
+        roundtrip_mode=gateway_roundtrip_mode,
+        quantity=candidate.amount,
+        buy_reference_price=candidate.top_of_book.best_ask,
+        sell_reference_price=candidate.top_of_book.best_bid,
+        buy_order_type=OrderKind.MARKET,
+        sell_order_type=OrderKind.MARKET,
+        max_gross_notional_usd=target_gross_volume_usd,
+        metadata={
+            "symbol": candidate.config.symbol,
+            "spread_bps": str(candidate.top_of_book.spread_bps),
+            "planned_gross_volume_usd": str(candidate.planned_gross_volume_usd),
+        },
+        buy_metadata={"source": "pacifica_live_volume"},
+        sell_metadata={"source": "pacifica_live_volume"},
+    )
+    gateway = build_live_preflight_gateway(
+        exchange_id="pacifica",
+        account_alias=gateway_account_alias,
+        market=candidate.config.display_market,
+        adapter_factory=lambda: PacificaAdapter(
+            api_endpoint=api_endpoint,
+            credential_prefix=args.credential_prefix,
+            environment=environment,
+            timeout_seconds=args.timeout_seconds,
+            allow_live_orders=False,
+        ),
+        entry_fee_bps=candidate.entry_fee_bps,
+        exit_fee_bps=candidate.exit_fee_bps,
+        fee_source=candidate.fee_source,
+        max_order_notional_usd=order_notional_usd + Decimal("1"),
+        max_gross_notional_usd=max(candidate.planned_gross_volume_usd, target_gross_volume_usd),
+        slippage_buffer_bps=candidate.slippage_buffer_bps,
+        open_orders_supported=True,
+        live_orders_enabled=args.execute_live,
+    )
+    gateway_preflight = run_live_gateway_preflight(
+        gateway=gateway,
+        trade_intent=gateway_trade_intent,
+        request_id="pacifica-live-volume-gateway-preflight",
+        include_read_only=True,
+    )
+    if not gateway_preflight.ready:
+        print("live_ready=False")
+        print("reason=gateway_preflight_not_ready")
+        return
+
     if not args.execute_live:
         print("live_ready=True")
         print(f"live_skipped=pass_--execute-live_and_--confirm_{CONFIRM_TEXT}")
@@ -356,6 +417,8 @@ def main() -> None:
         order_notional_usd=order_notional_usd,
         level_size_fraction=level_size_fraction,
         threshold_source=threshold_source,
+        gateway=gateway,
+        gateway_trade_intent=gateway_trade_intent,
     )
 
 
@@ -372,6 +435,8 @@ def _run_live_loop(
     order_notional_usd: Decimal,
     level_size_fraction: Decimal,
     threshold_source: str,
+    gateway: object,
+    gateway_trade_intent: object,
 ) -> None:
     dry_adapter = PacificaAdapter(
         api_endpoint=api_endpoint,
@@ -387,6 +452,13 @@ def _run_live_loop(
         timeout_seconds=args.timeout_seconds,
         allow_live_orders=True,
     )
+    live_adapter = GatewayLiveActionProxy(
+        target=live_adapter,
+        gateway=gateway,
+        trade_intent=gateway_trade_intent,
+        request_id_prefix="pacifica-live-volume-gateway-submit",
+    )
+    print("live_submit_route=execution_gateway_live_action_proxy")
 
     planned_gross_volume = Decimal("0")
     idle_cycles = 0
@@ -767,6 +839,26 @@ def _run_live_loop(
             entry_to_close_submit_gap_ms=entry_to_close_submit_gap_ms,
             cycle_total_latency_ms=cycle_total_latency_ms,
         )
+        emit_execution_event(
+            gateway.record_observation(
+                ExecutionRequest(
+                    request_id=f"pacifica-live-volume-cycle-{cycle}-gateway-observation",
+                    trade_intent=gateway_trade_intent,
+                ),
+                status="live_roundtrip_closed",
+                metadata={
+                    "filled_gross_volume_usd": round_gross,
+                    "final_position_count": 0,
+                    "final_open_order_count": 0,
+                    "final_all_flat": True,
+                    "entry_post_latency_ms": entry_post_latency_ms,
+                    "close_post_latency_ms": close_post_latency_ms,
+                    "entry_to_close_submit_gap_ms": entry_to_close_submit_gap_ms,
+                    "cycle_total_latency_ms": cycle_total_latency_ms,
+                    "order_ids": tuple(item for item in (entry_order_id, close_order_id) if item),
+                },
+            )
+        )
         if planned_gross_volume >= target_gross_volume_usd:
             print(f"stop_reason=target_volume_reached:{planned_gross_volume:.4f}>={target_gross_volume_usd:.4f}")
             break
@@ -896,6 +988,14 @@ def _normalize_close_mode_args(args: argparse.Namespace) -> None:
         args.close_mode = "fast-reduce-only" if args.fast_close_on_fill else "confirmed"
     if args.close_mode in {"fast-reduce-only", "netting"}:
         args.fast_close_on_fill = True
+
+
+def _gateway_roundtrip_mode(close_mode: str) -> RoundtripMode:
+    if close_mode == "netting":
+        return RoundtripMode.NETTING
+    if close_mode == "fast-reduce-only":
+        return RoundtripMode.FAST_REDUCE_ONLY
+    return RoundtripMode.CONFIRMED
 
 
 def _dependencies_ready() -> bool:
