@@ -15,6 +15,7 @@ from perpdex_farming_bot.connectors.hibachi_readonly import (
     DEFAULT_HIBACHI_DATA_API_ENDPOINT,
     endpoint_from_env,
 )
+from perpdex_farming_bot.core.execution_event import ExecutionEvent, emit_execution_event
 from perpdex_farming_bot.credentials import read_hibachi_credentials
 from perpdex_farming_bot.env import get_env, load_dotenv_if_present
 
@@ -445,7 +446,8 @@ def _run_live_volume_loop(
         plan_started_ns = _now_ns()
 
         snapshot_result = _load_snapshot(args, run_config, assignment, data_hub)
-        print(f"cycle={cycle} plan_latency_ms={_elapsed_ms(plan_started_ns)}")
+        plan_latency_ms = _elapsed_ms(plan_started_ns)
+        print(f"cycle={cycle} plan_latency_ms={plan_latency_ms}")
         if not snapshot_result.ok or snapshot_result.snapshot is None:
             idle_cycles += 1
             print(f"cycle={cycle} market_data_ok=False reason={snapshot_result.reason}")
@@ -503,8 +505,14 @@ def _run_live_volume_loop(
                 plan_latency_already_logged=True,
             )
             status = result.status
+            final_open_order_count = result.final_open_order_count
+            final_position_count = 0 if result.final_position_size <= 0 else 1
+            final_all_flat = result.final_all_flat
         else:
             status = _execute_paired_market_batch(client, assignment, args, quantity, first_side, second_side)
+            final_open_order_count = None
+            final_position_count = 0 if status == "ok_flat" else None
+            final_all_flat = status == "ok_flat"
         if status != "ok_flat":
             print(f"stop_reason={status}")
             print(f"final_estimated_gross_volume_usd={live_gross_volume:.4f}")
@@ -512,8 +520,29 @@ def _run_live_volume_loop(
 
         round_gross_volume = notional * Decimal("2")
         live_gross_volume += round_gross_volume
+        cycle_total_latency_ms = _elapsed_ms(cycle_started_ns)
         print(f"cycle={cycle} live_round_gross_volume_usd={round_gross_volume:.4f}")
         print(f"live_total_gross_volume_usd={live_gross_volume:.4f}")
+        emit_execution_event(
+            ExecutionEvent(
+                exchange="hibachi",
+                account_label=args.credential_prefix,
+                wallet_label=args.credential_prefix,
+                market=assignment.market,
+                cycle_id=f"cycle_{cycle}",
+                environment="PRODUCTION",
+                status=status,
+                live_spread_bps=Decimal(str(snapshot.spread_bps)),
+                planned_gross_volume_usd=round_gross_volume,
+                filled_gross_volume_usd=round_gross_volume,
+                final_position_count=final_position_count,
+                final_open_order_count=final_open_order_count,
+                final_all_flat=final_all_flat,
+                plan_latency_ms=Decimal(plan_latency_ms),
+                entry_to_close_submit_gap_ms=Decimal("0") if args.entry_mode == "paired-market-batch" else None,
+                cycle_total_latency_ms=Decimal(cycle_total_latency_ms),
+            )
+        )
 
         if _target_reached(live_gross_volume, args.target_gross_volume_usd):
             print(f"stop_reason=target_volume_reached:{live_gross_volume:.4f}>={args.target_gross_volume_usd:.4f}")

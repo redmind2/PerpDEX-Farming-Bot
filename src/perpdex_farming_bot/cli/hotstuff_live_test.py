@@ -495,6 +495,15 @@ def _emit_hotstuff_execution_event(
     final_open_order_count: int | None,
     status: str,
     filled_gross_volume_usd: Decimal | None = None,
+    final_all_flat: bool | None = None,
+    plan_latency_ms: Decimal | str | None = None,
+    entry_sign_latency_ms: Decimal | str | None = None,
+    close_sign_latency_ms: Decimal | str | None = None,
+    close_prebuild_sign_latency_ms: Decimal | str | None = None,
+    entry_post_latency_ms: Decimal | str | None = None,
+    close_post_latency_ms: Decimal | str | None = None,
+    entry_to_close_submit_gap_ms: Decimal | str | None = None,
+    cycle_total_latency_ms: Decimal | str | None = None,
     order_ids: tuple[str, ...] = (),
     error_reason: str | None = None,
 ) -> None:
@@ -540,6 +549,15 @@ def _emit_hotstuff_execution_event(
         final_position_count=final_position_count,
         start_open_order_count=start_open_order_count,
         final_open_order_count=final_open_order_count,
+        final_all_flat=final_all_flat,
+        plan_latency_ms=_optional_decimal(plan_latency_ms),
+        entry_sign_latency_ms=_optional_decimal(entry_sign_latency_ms),
+        close_sign_latency_ms=_optional_decimal(close_sign_latency_ms),
+        close_prebuild_sign_latency_ms=_optional_decimal(close_prebuild_sign_latency_ms),
+        entry_post_latency_ms=_optional_decimal(entry_post_latency_ms),
+        close_post_latency_ms=_optional_decimal(close_post_latency_ms),
+        entry_to_close_submit_gap_ms=_optional_decimal(entry_to_close_submit_gap_ms),
+        cycle_total_latency_ms=_optional_decimal(cycle_total_latency_ms),
         order_ids=order_ids,
         error_reason=error_reason,
         status=status,
@@ -838,6 +856,7 @@ def _execute_fast_close_loop(
             final_position_count=None,
             start_open_order_count=None,
             final_open_order_count=None,
+            plan_latency_ms=plan_latency_ms,
             status="fast_close_plan_selected",
         )
 
@@ -942,6 +961,7 @@ def _execute_fast_close_loop(
             for item in (entry_result.exchange_order_id, close_result.exchange_order_id)
             if item
         )
+        cycle_total_latency_ms = _elapsed_ms(cycle_started_ns, close_post_done_ns)
         _emit_hotstuff_execution_event(
             account_label=args.credential_prefix,
             environment=environment,
@@ -957,10 +977,16 @@ def _execute_fast_close_loop(
             final_position_count=None,
             start_open_order_count=None,
             final_open_order_count=None,
+            entry_sign_latency_ms=entry_sign_latency_ms,
+            close_sign_latency_ms=None if prebuilt_close is not None else close_sign_latency_ms,
+            close_prebuild_sign_latency_ms=close_prebuild_sign_latency_ms if prebuilt_close is not None else None,
+            entry_post_latency_ms=entry_post_latency_ms,
+            close_post_latency_ms=close_post_latency_ms,
+            entry_to_close_submit_gap_ms=entry_to_close_submit_gap_ms,
+            cycle_total_latency_ms=cycle_total_latency_ms,
             order_ids=order_ids,
             status="fast_close_cycle_completed",
         )
-        cycle_total_latency_ms = _elapsed_ms(cycle_started_ns, close_post_done_ns)
         print(f"cycle_{cycle}_total_latency_ms={cycle_total_latency_ms}")
         print(f"cycle_total_latency_ms={cycle_total_latency_ms}")
         if total < target_gross_volume:
@@ -1264,6 +1290,15 @@ def _position_market(position: dict[str, object]) -> str:
 
 def _safe_label(value: str) -> str:
     return re.sub(r"[^A-Za-z0-9]+", "_", value).strip("_").lower() or "market"
+
+
+def _optional_decimal(value: Decimal | str | None) -> Decimal | None:
+    if value is None:
+        return None
+    try:
+        return Decimal(str(value))
+    except Exception:
+        return None
 
 
 def _signer_registered_for_account(

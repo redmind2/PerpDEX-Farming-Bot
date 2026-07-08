@@ -37,6 +37,19 @@ class ExecutionEvent:
     final_position_count: int | None = None
     start_open_order_count: int | None = None
     final_open_order_count: int | None = None
+    final_all_flat: bool | None = None
+    plan_latency_ms: Decimal | None = None
+    entry_sign_latency_ms: Decimal | None = None
+    close_sign_latency_ms: Decimal | None = None
+    close_prebuild_sign_latency_ms: Decimal | None = None
+    entry_post_latency_ms: Decimal | None = None
+    close_post_latency_ms: Decimal | None = None
+    entry_to_close_submit_gap_ms: Decimal | None = None
+    cycle_total_latency_ms: Decimal | None = None
+    adapter_submit_elapsed_ms: Decimal | None = None
+    matched_trade_count: int | None = None
+    matched_trade_gross_usd: Decimal | None = None
+    matched_trade_fee_usd_estimate: Decimal | None = None
     order_ids: tuple[str, ...] = ()
     error_reason: str | None = None
     timestamp_utc: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
@@ -71,6 +84,19 @@ class ExecutionEvent:
             "final_position_count": self.final_position_count,
             "start_open_order_count": self.start_open_order_count,
             "final_open_order_count": self.final_open_order_count,
+            "final_all_flat": self.final_all_flat,
+            "plan_latency_ms": _decimal_or_none(self.plan_latency_ms),
+            "entry_sign_latency_ms": _decimal_or_none(self.entry_sign_latency_ms),
+            "close_sign_latency_ms": _decimal_or_none(self.close_sign_latency_ms),
+            "close_prebuild_sign_latency_ms": _decimal_or_none(self.close_prebuild_sign_latency_ms),
+            "entry_post_latency_ms": _decimal_or_none(self.entry_post_latency_ms),
+            "close_post_latency_ms": _decimal_or_none(self.close_post_latency_ms),
+            "entry_to_close_submit_gap_ms": _decimal_or_none(self.entry_to_close_submit_gap_ms),
+            "cycle_total_latency_ms": _decimal_or_none(self.cycle_total_latency_ms),
+            "adapter_submit_elapsed_ms": _decimal_or_none(self.adapter_submit_elapsed_ms),
+            "matched_trade_count": self.matched_trade_count,
+            "matched_trade_gross_usd": _decimal_or_none(self.matched_trade_gross_usd),
+            "matched_trade_fee_usd_estimate": _decimal_or_none(self.matched_trade_fee_usd_estimate),
             "order_ids": [_sanitize_identifier(item) for item in self.order_ids],
             "error_reason": self.error_reason,
             "status": self.status,

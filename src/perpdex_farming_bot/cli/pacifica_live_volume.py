@@ -198,7 +198,7 @@ def main() -> None:
     print(f"ledger_event_schema_version={LEDGER_EVENT_SCHEMA_VERSION}")
     print("ledger_event_output=key_value_lines")
     print("ledger_event_time_scopes=cycle,day_utc,iso_week_utc")
-    print("ledger_event_fields=exchange,run_mode,status,market,symbol,cycle,day_utc,iso_week_utc,gross_volume_usd,expected_loss_bps,expected_loss_usd,expected_fee_usd,fee_source,fee_event_status,points_status,error_alert")
+    print("ledger_event_fields=exchange,run_mode,status,market,symbol,cycle,day_utc,iso_week_utc,gross_volume_usd,expected_loss_bps,expected_loss_usd,expected_fee_usd,fee_source,fee_event_status,points_status,final_all_flat,entry_post_latency_ms,close_post_latency_ms,entry_to_close_submit_gap_ms,cycle_total_latency_ms,error_alert")
     print(f"required_confirmation={CONFIRM_TEXT}")
 
     try:
@@ -482,7 +482,8 @@ def _run_live_loop(
             slippage_percent=args.slippage_percent,
             expiry_window_ms=args.expiry_window_ms,
         )
-        print(f"cycle_{cycle}_entry_sign_latency_ms={_elapsed_ms(sign_entry_started_ns)}")
+        entry_sign_latency_ms = _elapsed_ms(sign_entry_started_ns)
+        print(f"cycle_{cycle}_entry_sign_latency_ms={entry_sign_latency_ms}")
         if signed_entry is None:
             print("stop_reason=entry_signing_failed")
             _print_ledger_error_event(
@@ -495,6 +496,7 @@ def _run_live_loop(
             break
 
         prebuilt_close: object | None = None
+        close_prebuild_sign_latency_ms: str | None = None
         if args.close_mode in {"fast-reduce-only", "netting"} and args.prebuild_close_order:
             sign_close_started_ns = _now_ns()
             prebuilt_close = _build_signed_market_order(
@@ -506,7 +508,8 @@ def _run_live_loop(
                 slippage_percent=args.slippage_percent,
                 expiry_window_ms=args.expiry_window_ms,
             )
-            print(f"cycle_{cycle}_close_prebuild_sign_latency_ms={_elapsed_ms(sign_close_started_ns)}")
+            close_prebuild_sign_latency_ms = _elapsed_ms(sign_close_started_ns)
+            print(f"cycle_{cycle}_close_prebuild_sign_latency_ms={close_prebuild_sign_latency_ms}")
             if prebuilt_close is None:
                 print("stop_reason=close_prebuild_signing_failed")
                 _print_ledger_error_event(
@@ -534,7 +537,8 @@ def _run_live_loop(
             )
             break
         entry_post_done_ns = _now_ns()
-        print(f"cycle_{cycle}_entry_post_latency_ms={_elapsed_ms(entry_post_started_ns, entry_post_done_ns)}")
+        entry_post_latency_ms = _elapsed_ms(entry_post_started_ns, entry_post_done_ns)
+        print(f"cycle_{cycle}_entry_post_latency_ms={entry_post_latency_ms}")
         _print_post_result("entry", entry_result)
         if not entry_result.ok:
             print("stop_reason=entry_order_failed")
@@ -563,6 +567,7 @@ def _run_live_loop(
             if prebuilt_close is not None:
                 signed_close = prebuilt_close
                 print("close_order_prebuilt=True")
+                close_sign_latency_ms = None
             else:
                 sign_close_started_ns = _now_ns()
                 signed_close = _build_signed_market_order(
@@ -574,7 +579,8 @@ def _run_live_loop(
                     slippage_percent=args.slippage_percent,
                     expiry_window_ms=args.expiry_window_ms,
                 )
-                print(f"cycle_{cycle}_close_sign_latency_ms={_elapsed_ms(sign_close_started_ns)}")
+                close_sign_latency_ms = _elapsed_ms(sign_close_started_ns)
+                print(f"cycle_{cycle}_close_sign_latency_ms={close_sign_latency_ms}")
                 if signed_close is None:
                     print("stop_reason=close_signing_failed")
                     _print_ledger_error_event(
@@ -609,7 +615,8 @@ def _run_live_loop(
                 slippage_percent=args.slippage_percent,
                 expiry_window_ms=args.expiry_window_ms,
             )
-            print(f"cycle_{cycle}_close_sign_latency_ms={_elapsed_ms(sign_close_started_ns)}")
+            close_sign_latency_ms = _elapsed_ms(sign_close_started_ns)
+            print(f"cycle_{cycle}_close_sign_latency_ms={close_sign_latency_ms}")
             if signed_close is None:
                 print("stop_reason=close_signing_failed")
                 _print_ledger_error_event(
@@ -622,7 +629,8 @@ def _run_live_loop(
                 break
 
         print("live_close_submitting=True")
-        print(f"cycle_{cycle}_entry_to_close_submit_gap_ms={_elapsed_ms(entry_post_done_ns)}")
+        entry_to_close_submit_gap_ms = _elapsed_ms(entry_post_done_ns)
+        print(f"cycle_{cycle}_entry_to_close_submit_gap_ms={entry_to_close_submit_gap_ms}")
         close_post_started_ns = _now_ns()
         try:
             close_result = live_adapter.submit_signed_order_request(signed_close)
@@ -638,7 +646,8 @@ def _run_live_loop(
             )
             break
         close_post_done_ns = _now_ns()
-        print(f"cycle_{cycle}_close_post_latency_ms={_elapsed_ms(close_post_started_ns, close_post_done_ns)}")
+        close_post_latency_ms = _elapsed_ms(close_post_started_ns, close_post_done_ns)
+        print(f"cycle_{cycle}_close_post_latency_ms={close_post_latency_ms}")
         _print_post_result("close", close_result)
         if not close_result.ok:
             print("stop_reason=close_order_failed_manual_review_required")
@@ -736,7 +745,8 @@ def _run_live_loop(
         planned_gross_volume += round_gross
         print(f"cycle_planned_gross_volume_usd={round_gross:.4f}")
         print(f"live_total_planned_gross_volume_usd={planned_gross_volume:.4f}")
-        print(f"cycle_{cycle}_total_latency_ms={_elapsed_ms(cycle_started_ns, close_post_done_ns)}")
+        cycle_total_latency_ms = _elapsed_ms(cycle_started_ns, close_post_done_ns)
+        print(f"cycle_{cycle}_total_latency_ms={cycle_total_latency_ms}")
         _print_ledger_cycle_event(
             f"cycle_{cycle}",
             fresh,
@@ -749,7 +759,13 @@ def _run_live_loop(
             final_all_flat=True,
             entry_order_id_present=bool(entry_order_id),
             close_order_id_present=bool(close_order_id),
-            cycle_total_latency_ms=_elapsed_ms(cycle_started_ns, close_post_done_ns),
+            entry_sign_latency_ms=entry_sign_latency_ms,
+            close_sign_latency_ms=close_sign_latency_ms,
+            close_prebuild_sign_latency_ms=close_prebuild_sign_latency_ms,
+            entry_post_latency_ms=entry_post_latency_ms,
+            close_post_latency_ms=close_post_latency_ms,
+            entry_to_close_submit_gap_ms=entry_to_close_submit_gap_ms,
+            cycle_total_latency_ms=cycle_total_latency_ms,
         )
         if planned_gross_volume >= target_gross_volume_usd:
             print(f"stop_reason=target_volume_reached:{planned_gross_volume:.4f}>={target_gross_volume_usd:.4f}")
@@ -1280,6 +1296,12 @@ def _print_ledger_cycle_event(
     final_all_flat: bool | None,
     entry_order_id_present: bool | None = None,
     close_order_id_present: bool | None = None,
+    entry_sign_latency_ms: str | None = None,
+    close_sign_latency_ms: str | None = None,
+    close_prebuild_sign_latency_ms: str | None = None,
+    entry_post_latency_ms: str | None = None,
+    close_post_latency_ms: str | None = None,
+    entry_to_close_submit_gap_ms: str | None = None,
     cycle_total_latency_ms: str | None = None,
 ) -> None:
     entry_notional = candidate.entry_notional_usd
@@ -1335,6 +1357,12 @@ def _print_ledger_cycle_event(
         "final_all_flat": "unknown" if final_all_flat is None else final_all_flat,
         "entry_order_id_present": "unknown" if entry_order_id_present is None else entry_order_id_present,
         "close_order_id_present": "unknown" if close_order_id_present is None else close_order_id_present,
+        "entry_sign_latency_ms": entry_sign_latency_ms or "unknown",
+        "close_sign_latency_ms": close_sign_latency_ms or "unknown",
+        "close_prebuild_sign_latency_ms": close_prebuild_sign_latency_ms or "unknown",
+        "entry_post_latency_ms": entry_post_latency_ms or "unknown",
+        "close_post_latency_ms": close_post_latency_ms or "unknown",
+        "entry_to_close_submit_gap_ms": entry_to_close_submit_gap_ms or "unknown",
         "cycle_total_latency_ms": cycle_total_latency_ms or "unknown",
         "error_alert": False,
         "error_reason": "",

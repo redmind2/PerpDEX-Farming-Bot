@@ -336,6 +336,8 @@ def main() -> None:
         markets=markets,
         adapter=live_adapter,
         fee_provider=fee_provider,
+        environment=environment,
+        account_label=credential_env.prefix,
         args=args,
     )
 
@@ -519,6 +521,8 @@ def _run_volume_loop(
     markets: tuple[MarketRuntime, ...],
     adapter: RisexAdapter,
     fee_provider: RisexFeeProvider,
+    environment: str,
+    account_label: str,
     args: argparse.Namespace,
 ) -> None:
     total = Decimal("0")
@@ -845,7 +849,15 @@ def _run_volume_loop(
 
     if total < args.target_gross_volume_usd and cycle >= args.max_cycles:
         print(f"volume_loop_stopped=max_cycles_reached:{args.max_cycles}")
-    _print_final_state(api_endpoint, credentials["account_address"], markets, args, total)
+    _print_final_state(
+        api_endpoint,
+        credentials["account_address"],
+        markets,
+        args,
+        total,
+        environment=environment,
+        account_label=account_label,
+    )
 
 
 def _choose_plan(
@@ -1147,9 +1159,14 @@ def _print_final_state(
     markets: tuple[MarketRuntime, ...],
     args: argparse.Namespace,
     total: Decimal,
+    *,
+    environment: str,
+    account_label: str,
 ) -> None:
     print(f"final_estimated_gross_volume_usd={fmt_decimal(total)}")
     all_flat = True
+    final_position_count = 0
+    final_open_order_count = 0
     for market in markets:
         cycle_args = _common_args(args, market.market_id)
         steps = _settled_position_steps(
@@ -1169,9 +1186,27 @@ def _print_final_state(
         open_orders = _extract_open_orders(open_orders_payload)
         print(f"final_market_{market.market_id}_open_order_count={len(open_orders)}")
         print(f"final_market_{market.market_id}_position_steps={steps}")
+        if steps != 0:
+            final_position_count += 1
+        final_open_order_count += len(open_orders)
         if steps != 0 or open_orders:
             all_flat = False
     print(f"final_all_flat={all_flat}")
+    emit_execution_event(
+        ExecutionEvent(
+            exchange="risex",
+            account_label=account_label,
+            wallet_label=account_label,
+            cycle_id="run_final_state",
+            environment=environment,
+            status="flat" if all_flat else "position_or_open_order_remaining",
+            filled_gross_volume_usd=total,
+            final_position_count=final_position_count,
+            final_open_order_count=final_open_order_count,
+            final_all_flat=all_flat,
+            error_reason="" if all_flat else "final_position_or_open_order_remaining",
+        )
+    )
 
 
 def _build_signed_order_with_nonce(

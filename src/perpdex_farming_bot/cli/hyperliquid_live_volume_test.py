@@ -25,6 +25,7 @@ from perpdex_farming_bot.connectors.hyperliquid_readonly import (
     normalize_hyperliquid_environment,
     validate_https_base_url,
 )
+from perpdex_farming_bot.core.execution_event import ExecutionEvent, emit_execution_event
 from perpdex_farming_bot.core.live_volume import RoundtripPlan, VolumeRunConfig, run_paired_volume
 from perpdex_farming_bot.credentials import (
     hyperliquid_available_private_readonly_env,
@@ -450,7 +451,29 @@ def main() -> None:
     print(f"final_position_count={final_position_count}")
     print(f"final_open_order_count={final_open_order_count}")
     print("summary_end=True")
-    if final_position_count == 0 and final_open_order_count == 0:
+    final_all_flat = final_position_count == 0 and final_open_order_count == 0
+    emit_execution_event(
+        ExecutionEvent(
+            exchange="hyperliquid",
+            account_label=args.credential_prefix,
+            wallet_label=args.credential_prefix,
+            cycle_id="run_final_state",
+            environment=environment,
+            status="closed_flat_or_not_detected" if final_all_flat else "position_or_open_order_manual_review_required",
+            filled_gross_volume_usd=filled_gross,
+            estimated_fee_usd=estimated_fee,
+            estimated_loss_usd=estimated_total_loss,
+            realized_pnl_usd=-realized_loss if realized_loss is not None else None,
+            final_position_count=final_position_count,
+            final_open_order_count=final_open_order_count,
+            final_all_flat=final_all_flat,
+            cycle_total_latency_ms=Decimal(str(round(elapsed_seconds * 1000, 2))),
+            matched_trade_count=len(order_ids),
+            matched_trade_fee_usd_estimate=fill_fee_usd,
+            error_reason="" if final_all_flat else "position_or_open_order_manual_review_required",
+        )
+    )
+    if final_all_flat:
         print("live_test_status=closed_flat_or_not_detected")
     else:
         print("live_test_status=position_or_open_order_manual_review_required")

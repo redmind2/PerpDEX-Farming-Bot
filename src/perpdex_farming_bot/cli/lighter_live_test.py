@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 import asyncio
 import importlib.util
-import json
 import sys
 import time
 from dataclasses import dataclass
@@ -25,6 +24,7 @@ from perpdex_farming_bot.credentials import (
     read_lighter_credentials,
 )
 from perpdex_farming_bot.env import get_env, load_dotenv_if_present, masked_env_status
+from perpdex_farming_bot.core.execution_event import ExecutionEvent, emit_execution_event
 from perpdex_farming_bot.marketdata.lighter import (
     LighterMarketMetadata,
     fetch_lighter_rest_top_of_book,
@@ -82,6 +82,7 @@ class SendTxSummary:
     predicted_execution_time_ms: int | None
     volume_quota_remaining: int | None
     error_present: bool
+    elapsed_ms: Decimal | None = None
 
 
 def main() -> None:
@@ -295,7 +296,7 @@ async def _execute_live_roundtrip(
         print(f"entry_error_type={exc.__class__.__name__}")
         return
     entry_elapsed_ms = (time.perf_counter() - entry_start) * 1000
-    entry_summary = _send_tx_summary(entry_response, entry_error)
+    entry_summary = _send_tx_summary(entry_response, entry_error, entry_elapsed_ms)
     _print_send_tx_summary("entry", entry_summary, entry_elapsed_ms)
     if not entry_summary.ok:
         print("live_aborted=entry_send_tx_not_ok")
@@ -303,6 +304,7 @@ async def _execute_live_roundtrip(
 
     client_order_indexes = {entry_client_order_index, close_client_order_index}
     close_summary: SendTxSummary | None
+    roundtrip_order_elapsed_ms: Decimal | None = None
     if args.close_mode == "netting":
         print("netting_roundtrip_enabled=True")
         close_summary = await _submit_market_close(
@@ -316,7 +318,8 @@ async def _execute_live_roundtrip(
             reduce_only=False,
             label="close",
         )
-        print(f"roundtrip_order_elapsed_ms={(time.perf_counter() - order_start) * 1000:.2f}")
+        roundtrip_order_elapsed_ms = _elapsed_decimal_from_perf(order_start)
+        print(f"roundtrip_order_elapsed_ms={roundtrip_order_elapsed_ms}")
         netting_amount = _poll_selected_position(
             api_endpoint=api_endpoint,
             account_index=account_index,
@@ -362,7 +365,8 @@ async def _execute_live_roundtrip(
             reduce_only=True,
             label="close",
         )
-        print(f"roundtrip_order_elapsed_ms={(time.perf_counter() - order_start) * 1000:.2f}")
+        roundtrip_order_elapsed_ms = _elapsed_decimal_from_perf(order_start)
+        print(f"roundtrip_order_elapsed_ms={roundtrip_order_elapsed_ms}")
         optimistic_amount = _poll_selected_position(
             api_endpoint=api_endpoint,
             account_index=account_index,
@@ -427,7 +431,8 @@ async def _execute_live_roundtrip(
             args=args,
             label="close",
         )
-        print(f"roundtrip_order_elapsed_ms={(time.perf_counter() - order_start) * 1000:.2f}")
+        roundtrip_order_elapsed_ms = _elapsed_decimal_from_perf(order_start)
+        print(f"roundtrip_order_elapsed_ms={roundtrip_order_elapsed_ms}")
 
     if close_summary is None or (args.close_mode == "confirmed" and not close_summary.ok):
         print("manual_review_required=True")
@@ -465,21 +470,33 @@ async def _execute_live_roundtrip(
         attempts=args.trade_poll_attempts,
         delay_seconds=args.trade_poll_delay_seconds,
     )
-    event = {
-        "exchange": "lighter",
-        "market_id": args.market_id,
-        "symbol": args.symbol,
-        "entry_sent_ok": entry_summary.ok,
-        "close_sent_ok": close_summary.ok,
-        "final_selected_position_amount": fmt_decimal(final_amount),
-        "final_open_order_count": final_state.open_order_count,
-        "matched_trade_count": trade_summary["matched_trade_count"],
-        "matched_trade_gross_usd": trade_summary["matched_trade_gross_usd"],
-        "matched_trade_fee_usd_estimate": trade_summary["matched_trade_fee_usd_estimate"],
-    }
     print("ledger_event_schema_version=1")
-    print("execution_event_json=" + json.dumps(event, separators=(",", ":"), sort_keys=True))
-    if final_amount == 0 and final_state.open_order_count == 0:
+    final_all_flat = final_amount == 0 and final_state.open_order_count == 0
+    emit_execution_event(
+        ExecutionEvent(
+            exchange="lighter",
+            account_label=args.credential_prefix,
+            wallet_label=args.credential_prefix,
+            market=f"{args.symbol}-PERP",
+            cycle_id="live_roundtrip",
+            environment="PRODUCTION",
+            status="closed_flat" if final_all_flat else "position_or_open_order_remains_manual_review_required",
+            planned_gross_volume_usd=entry_plan.planned_one_side_notional_usd * Decimal("2"),
+            filled_gross_volume_usd=_optional_decimal_value(trade_summary["matched_trade_gross_usd"]),
+            start_position_count=0,
+            final_position_count=0 if final_amount == 0 else 1,
+            start_open_order_count=0,
+            final_open_order_count=final_state.open_order_count,
+            final_all_flat=final_all_flat,
+            entry_post_latency_ms=entry_summary.elapsed_ms,
+            close_post_latency_ms=close_summary.elapsed_ms,
+            cycle_total_latency_ms=roundtrip_order_elapsed_ms,
+            matched_trade_count=int(trade_summary["matched_trade_count"]),
+            matched_trade_gross_usd=_optional_decimal_value(trade_summary["matched_trade_gross_usd"]),
+            matched_trade_fee_usd_estimate=_optional_decimal_value(trade_summary["matched_trade_fee_usd_estimate"]),
+        )
+    )
+    if final_all_flat:
         print("final_all_flat=True")
         print("live_test_status=closed_flat")
     else:
@@ -562,7 +579,7 @@ async def _submit_market_close(
         print(f"{label}_error_type={exc.__class__.__name__}")
         return None
     close_elapsed_ms = (time.perf_counter() - close_start) * 1000
-    close_summary = _send_tx_summary(close_response, close_error)
+    close_summary = _send_tx_summary(close_response, close_error, close_elapsed_ms)
     _print_send_tx_summary(label, close_summary, close_elapsed_ms)
     return close_summary
 
@@ -969,7 +986,7 @@ def _poll_and_print_trade_summary(
     return summary
 
 
-def _send_tx_summary(response: object, error: object) -> SendTxSummary:
+def _send_tx_summary(response: object, error: object, elapsed_ms: float) -> SendTxSummary:
     code = _object_attr(response, "code")
     return SendTxSummary(
         ok=code == 200 and not error,
@@ -979,6 +996,7 @@ def _send_tx_summary(response: object, error: object) -> SendTxSummary:
         predicted_execution_time_ms=_optional_int(_object_attr(response, "predicted_execution_time_ms")),
         volume_quota_remaining=_optional_int(_object_attr(response, "volume_quota_remaining")),
         error_present=bool(error),
+        elapsed_ms=_decimal_ms(elapsed_ms),
     )
 
 
@@ -991,6 +1009,21 @@ def _print_send_tx_summary(label: str, summary: SendTxSummary, elapsed_ms: float
     print(f"{label}_volume_quota_remaining={summary.volume_quota_remaining}")
     print(f"{label}_error_present={summary.error_present}")
     print(f"{label}_elapsed_ms={elapsed_ms:.2f}")
+
+
+def _elapsed_decimal_from_perf(start: float) -> Decimal:
+    return _decimal_ms((time.perf_counter() - start) * 1000)
+
+
+def _decimal_ms(value: float) -> Decimal:
+    return Decimal(str(round(value, 2)))
+
+
+def _optional_decimal_value(value: object) -> Decimal | None:
+    try:
+        return Decimal(str(value))
+    except Exception:
+        return None
 
 
 def _walk_position_objects(payload: object) -> list[dict[str, object]]:
